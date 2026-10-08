@@ -1,0 +1,66 @@
+{
+  "name": "veilpilot",
+  "productName": "VeilPilot",
+  "version": "0.1.0",
+  "description": "Heads-up AI copilot that stays out of your screen share. Screenshot, transcribe, ask — on hotkeys.",
+  "main": "src/main/index.js",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "icons": "node build/make-icons.js",
+    "postinstall": "node build/make-icons.js",
+    "dist": "npm run icons && electron-builder",
+    "dist:mac": "npm run icons && electron-builder --mac",
+    "dist:win": "npm run icons && electron-builder --win"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.132.1"
+  },
+  "devDependencies": {
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "co.interopera.veilpilot",
+    "productName": "VeilPilot",
+    "files": [
+      "src/**/*",
+      "build/*.png"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "extendInfo": {
+        "LSUIElement": true,
+        "NSMicrophoneUsageDescription": "VeilPilot records your microphone only while you hold the transcribe hotkey, to turn speech into text.",
+        "NSCameraUsageDescription": "Not used."
+      }
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
