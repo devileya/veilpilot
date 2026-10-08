@@ -13,6 +13,8 @@ window.Settings = (() => {
   let devices = []
   let claudeCodeStatus = null
   let claudeCodeProbe = null
+  let whisperStatus = null
+  let whisperProbe = null
 
   const esc = (value) => Markdown.escape(value ?? '')
 
@@ -131,7 +133,7 @@ window.Settings = (() => {
     return [
       '<p class="sectionLabel">Answers</p>',
       field('Provider', select('chat.provider', chat.provider,
-        current.providers.map((p) => [p.id, p.label]))),
+        current.providers.filter((p) => p.chat !== false).map((p) => [p.id, p.label]))),
       isClaudeCode
         ? field('Model', text('chat.model', chat.model, 'whatever Claude Code uses'),
             'An alias such as <b>sonnet</b> or <b>opus</b>, or a full model id. Blank keeps the CLI default.')
@@ -169,10 +171,55 @@ window.Settings = (() => {
     ].join('')
   }
 
+  function viewWhisper () {
+    const cfg = current.config.transcription.whisperCpp || {}
+    const found = whisperStatus
+    const install = current.platform === 'darwin'
+      ? 'brew install whisper-cpp'
+      : 'see github.com/ggml-org/whisper.cpp for a Windows build'
+
+    const binary = !found
+      ? '<p class="fieldHint" style="margin-bottom:12px">Looking for whisper.cpp…</p>'
+      : found.binaryPath
+        ? `<p class="fieldHint" style="margin-bottom:12px">Engine: <b>${esc(found.binaryPath)}</b></p>`
+        : `<p class="fieldHint" style="margin-bottom:12px;color:var(--live)">${esc(found.error)}<br>Install it with <b>${esc(install)}</b>.</p>`
+
+    const models = (found?.models || []).map((m) => {
+      const active = found.modelName === m.file
+      return `<div class="keyRow">
+        <div class="who">${esc(m.label)}${active ? '<em>in use</em>' : ''}</div>
+        <span class="mark ${m.installed ? 'set' : 'unset'}" style="flex:1 1 auto">${m.installed ? esc(m.installed) : 'not downloaded'}</span>
+        ${m.installed
+          ? ''
+          : `<button class="btn" data-act="getModel" data-model="${esc(m.file)}">Download</button>`}
+      </div>`
+    }).join('')
+
+    return [
+      binary,
+      found?.modelPath
+        ? ''
+        : '<p class="fieldHint" style="margin-bottom:12px;color:var(--live)">No model yet — download one below. Audio stays on this machine either way.</p>',
+      '<p class="sectionLabel">Models</p>',
+      `<p class="fieldHint" style="margin-bottom:12px">Bigger is more accurate and slower. <b>small</b> is the usual choice for languages other than English. Saved under ${esc(current.paths.config.replace(/config\.json$/, 'models/'))}</p>`,
+      models,
+      `<div id="whisperProgress" class="fieldHint" style="margin:8px 0 14px"></div>`,
+      field('Model file', text('transcription.whisperCpp.modelPath', cfg.modelPath, found?.modelPath || 'auto'),
+        'Blank picks the largest model found.'),
+      field('Engine path', text('transcription.whisperCpp.binaryPath', cfg.binaryPath, found?.binaryPath || 'auto')),
+      `<div class="row">
+        ${field('Threads', number('transcription.whisperCpp.threads', cfg.threads || 0, 0, 32))}
+        ${field('Output', select('transcription.whisperCpp.translate', cfg.translate ? 'yes' : 'no',
+          [['no', 'original language'], ['yes', 'translate to English']]))}
+      </div>`
+    ].join('')
+  }
+
   function viewVoice () {
     const voice = current.config.transcription
     const provider = current.providers.find((p) => p.id === voice.provider) || {}
     const ready = current.transcription
+    const isLocal = provider.kind === 'whispercpp'
 
     const deviceOptions = [['', 'System default'], ...devices.map((d) => [d.id, d.label])]
     const macSystemAudio = current.platform === 'darwin'
@@ -180,17 +227,25 @@ window.Settings = (() => {
     return [
       '<p class="sectionLabel">Speech to text</p>',
       ready.ok
-        ? `<p class="fieldHint" style="margin-bottom:14px">Ready — <b>${esc(ready.provider)}</b> · ${esc(ready.model)}</p>`
+        ? `<p class="fieldHint" style="margin-bottom:14px">Ready — <b>${esc(ready.provider)}</b> · ${esc(ready.model)}${ready.local ? ' · nothing leaves this machine' : ''}</p>`
         : `<p class="fieldHint" style="margin-bottom:14px;color:var(--live)">${esc(ready.reason)}</p>`,
       field('Provider', select('transcription.provider', voice.provider,
-        current.providers.map((p) => [p.id, p.transcription ? p.label : `${p.label} (no speech API)`]))),
-      `<div class="row">
-        ${field('Model', text('transcription.model', voice.model, provider.transcriptionModel || 'whisper-1'))}
-        ${field('Language', text('transcription.language', voice.language, 'auto'))}
-      </div>`,
-      field('Base URL', text('transcription.baseUrl', voice.baseUrl, provider.baseUrl || '')),
+        current.providers
+          .filter((p) => p.transcription || p.id === voice.provider)
+          .map((p) => [p.id, p.transcription ? p.label : `${p.label} (no speech API)`]))),
+      isLocal
+        ? field('Language', text('transcription.language', voice.language, 'auto'),
+            'A language code such as <b>id</b> or <b>en</b>. Naming it is about 40% faster than auto-detect, and more reliable on short clips.')
+        : `<div class="row">
+            ${field('Model', text('transcription.model', voice.model, provider.transcriptionModel || 'whisper-1'))}
+            ${field('Language', text('transcription.language', voice.language, 'auto'))}
+          </div>`,
+      isLocal ? viewWhisper() : field('Base URL', text('transcription.baseUrl', voice.baseUrl, provider.baseUrl || '')),
+      '<p class="sectionLabel">Recording</p>',
       field('Chunk length', number('transcription.chunkSeconds', voice.chunkSeconds, 0, 120),
-        'Seconds per upload while recording. <b>0</b> transcribes once when you stop — most accurate. <b>15–30</b> gives a rolling transcript during a long call. Values under 5 are ignored.'),
+        isLocal
+          ? 'Seconds per pass while recording. <b>0</b> transcribes once when you stop — most accurate. <b>15–30</b> gives a rolling transcript during a long call and keeps the model warm.'
+          : 'Seconds per upload while recording. <b>0</b> transcribes once when you stop — most accurate. <b>15–30</b> gives a rolling transcript during a long call. Values under 5 are ignored.'),
       '<p class="sectionLabel">Input</p>',
       field('Microphone', select('transcription.inputDeviceId', voice.inputDeviceId, deviceOptions),
         devices.length ? '' : 'Device names appear after you grant microphone access once.'),
@@ -326,6 +381,21 @@ window.Settings = (() => {
       node.classList.toggle('is-on', node.dataset.tab === tab)
     }
     probeClaudeCode()
+    probeWhisper()
+  }
+
+  async function probeWhisper (force = false) {
+    const voice = current?.config.transcription
+    if (!voice) return
+    const provider = current.providers.find((p) => p.id === voice.provider)
+    if (provider?.kind !== 'whispercpp') return
+
+    const cfg = voice.whisperCpp || {}
+    const key = `${cfg.binaryPath || ''}|${cfg.modelPath || ''}`
+    if (!force && whisperProbe === key) return
+    whisperProbe = key
+    whisperStatus = await window.veil.detectWhisper()
+    if (open && tab === 'voice') rebuild()
   }
 
   // Finding the CLI touches the filesystem, so it runs once per binary-path
@@ -361,12 +431,17 @@ window.Settings = (() => {
     const node = event.target
     const path = node.dataset.path
     if (path) {
-      const value = node.type === 'checkbox'
+      let value = node.type === 'checkbox'
         ? node.checked
         : node.type === 'number' ? Number(node.value) : node.value
-      // Switching provider changes which fields are relevant; a new binary
-      // path has to be re-probed.
-      const structural = path.endsWith('.provider') || path === 'chat.claudeCode.binaryPath'
+      // One select stands in for a boolean, because "original language" reads
+      // better than an unlabelled tick box.
+      if (path.endsWith('.translate')) value = value === 'yes'
+      // Switching provider changes which fields are relevant; a new binary or
+      // model path has to be re-probed.
+      const structural = path.endsWith('.provider') ||
+        path === 'chat.claudeCode.binaryPath' ||
+        path.startsWith('transcription.whisperCpp.')
       await window.veil.setConfig(nest(path, value))
       await hooks.refresh?.()
       if (structural) rebuild()
@@ -445,6 +520,19 @@ window.Settings = (() => {
     } else if (action === 'clearTranscript') {
       await window.veil.clearTranscript()
       hooks.toast?.('info', 'Transcript cleared.')
+    } else if (action === 'getModel') {
+      const file = event.target.dataset.model
+      event.target.disabled = true
+      event.target.textContent = 'Downloading…'
+      const result = await window.veil.downloadWhisperModel(file)
+      if (result?.ok) {
+        await hooks.refresh?.()
+        await probeWhisper(true)
+        rebuild()
+      } else {
+        event.target.disabled = false
+        event.target.textContent = 'Download'
+      }
     } else if (action === 'openScreenSettings') {
       await window.veil.perms.openScreenSettings()
     } else if (action === 'quit') {
@@ -466,7 +554,17 @@ window.Settings = (() => {
 
   /* ---------- api ---------- */
 
-  function init (next) { hooks = next || {} }
+  function init (next) {
+    hooks = next || {}
+    // Written straight into the node: a 488 MB download would otherwise
+    // re-render the whole tab a hundred times.
+    window.veil.on.whisperProgress(({ file, percent, received, total }) => {
+      const node = document.getElementById('whisperProgress')
+      if (!node) return
+      const mb = (n) => (n / 1048576).toFixed(0)
+      node.innerHTML = `Downloading <b>${esc(file)}</b> — ${percent}% (${mb(received)} / ${mb(total)} MB)`
+    })
+  }
 
   function render (state) { current = state }
 

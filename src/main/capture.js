@@ -37,16 +37,36 @@ function listDisplays () {
   }))
 }
 
+const PERMISSION_HELP =
+  'macOS is refusing screen capture. Grant Screen Recording to VeilPilot in ' +
+  'System Settings › Privacy & Security › Screen Recording, then quit and ' +
+  'relaunch the app — the permission only takes effect on a fresh launch.'
+
 async function grabDisplay (display) {
   const scale = display.scaleFactor || 1
-  const sources = await desktopCapturer.getSources({
-    types: ['screen'],
-    fetchWindowIcons: false,
-    thumbnailSize: {
-      width: Math.round(display.size.width * scale),
-      height: Math.round(display.size.height * scale)
-    }
-  })
+
+  if (process.platform === 'darwin' && screenPermission() !== 'granted') {
+    throw new Error(PERMISSION_HELP)
+  }
+
+  let sources
+  try {
+    sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      fetchWindowIcons: false,
+      thumbnailSize: {
+        width: Math.round(display.size.width * scale),
+        height: Math.round(display.size.height * scale)
+      }
+    })
+  } catch (err) {
+    // Electron reports this as a bare "Failed to get sources", which tells
+    // nobody what to do about it.
+    throw new Error(process.platform === 'darwin'
+      ? PERMISSION_HELP
+      : `Screen capture failed: ${err.message}`)
+  }
+
   if (!sources.length) throw new Error('No screen sources available')
   const source =
     sources.find((s) => String(s.display_id) === String(display.id)) || sources[0]

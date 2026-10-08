@@ -9,6 +9,7 @@ const hotkeys = require('./hotkeys')
 const transcribe = require('./transcribe')
 const ai = require('./ai')
 const claudeCode = require('./ai/claude-code')
+const whisperCpp = require('./whisper-cpp')
 const { PROVIDERS } = require('./defaults')
 
 let handlers = {}
@@ -27,6 +28,7 @@ function providerList () {
     transcriptionModel: p.transcriptionModel || '',
     vision: !!p.vision,
     transcription: !!p.transcription,
+    chat: p.chat !== false,
     needsKey: p.needsKey !== false,
     keyUrl: p.keyUrl || ''
   }))
@@ -84,6 +86,22 @@ function register (appHandlers) {
 
   ipcMain.handle('claudecode:detect', () =>
     claudeCode.detect(store.readConfig().chat.claudeCode.binaryPath))
+
+  ipcMain.handle('whisper:detect', () =>
+    whisperCpp.detectSync(store.readConfig().transcription.whisperCpp || {}))
+
+  ipcMain.handle('whisper:download', async (_e, file) => {
+    try {
+      const result = await whisperCpp.downloadModel(file, (progress) =>
+        overlay.send('whisper:progress', progress))
+      overlay.send('status', bootstrap())
+      toast('info', `${file} is ready.`)
+      return result
+    } catch (err) {
+      toast('error', err.message)
+      return { ok: false, error: err.message }
+    }
+  })
 
   /* ---------- asking ---------- */
 

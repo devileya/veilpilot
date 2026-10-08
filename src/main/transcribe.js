@@ -1,6 +1,7 @@
 'use strict'
 
 const store = require('./store')
+const whisperCpp = require('./whisper-cpp')
 const { PROVIDERS } = require('./defaults')
 
 const MAX_BYTES = 25 * 1024 * 1024 // OpenAI's documented ceiling; others are looser
@@ -27,6 +28,15 @@ function readiness () {
   const preset = PROVIDERS[cfg.provider]
   const resolved = store.resolve('transcription')
 
+  // On-device: nothing to authenticate, but the binary and a model have to
+  // actually be there.
+  if (preset && preset.kind === 'whispercpp') {
+    const state = whisperCpp.detectSync(cfg.whisperCpp || {})
+    return state.ok
+      ? { ok: true, provider: preset.label, model: state.modelName, local: true }
+      : { ok: false, reason: state.error, local: true }
+  }
+
   if (preset && preset.transcription === false) {
     return {
       ok: false,
@@ -48,11 +58,21 @@ async function transcribe ({ bytes, mime }) {
 
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
   if (!buffer.length) throw new Error('Recording was empty.')
+
+  const cfg = store.readConfig().transcription
+  if (PROVIDERS[cfg.provider]?.kind === 'whispercpp') {
+    // No upload, so no size ceiling — the only limit is patience.
+    return whisperCpp.transcribe({
+      bytes: buffer,
+      cfg: cfg.whisperCpp || {},
+      language: cfg.language
+    })
+  }
+
   if (buffer.length > MAX_BYTES) {
     throw new Error(`Recording is ${(buffer.length / 1048576).toFixed(1)} MB — over the 25 MB upload limit. Turn on chunked transcription in Settings.`)
   }
 
-  const cfg = store.readConfig().transcription
   const provider = store.resolve('transcription')
 
   const form = new FormData()

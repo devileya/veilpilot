@@ -90,6 +90,18 @@ const PROVIDERS = {
     needsKey: false,
     keyUrl: 'https://ollama.com/download'
   },
+  local: {
+    label: 'Local (whisper.cpp)',
+    kind: 'whispercpp',
+    // Transcription only: nothing here answers chat.
+    chat: false,
+    baseUrl: '',
+    model: '',
+    vision: false,
+    transcription: true,
+    needsKey: false,
+    keyUrl: 'https://github.com/ggml-org/whisper.cpp'
+  },
   custom: {
     label: 'Custom (OpenAI-compatible)',
     kind: 'openai',
@@ -211,13 +223,19 @@ const CONFIG = {
     }
   },
   transcription: {
-    provider: 'openai',
+    provider: 'local',    // on-device by default: meeting audio never leaves
     baseUrl: '',
     model: '',
     language: '',         // '' -> autodetect
     chunkSeconds: 0,      // 0 -> transcribe once on stop; >0 -> rolling chunks
     inputDeviceId: '',
-    captureSystemAudio: false
+    captureSystemAudio: false,
+    whisperCpp: {
+      binaryPath: '',     // '' -> probe PATH and the usual install locations
+      modelPath: '',      // '' -> probe the model directory
+      threads: 0,         // 0 -> let whisper.cpp decide
+      translate: false    // true -> always output English
+    }
   },
   capture: {
     maxDimension: 1600,   // downscale before upload; caps cost and latency

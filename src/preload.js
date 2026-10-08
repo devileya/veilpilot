@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld('veil', {
   setKey: (provider, key) => ipcRenderer.invoke('secrets:set', { provider, key }),
   reapplyHotkeys: () => ipcRenderer.invoke('hotkeys:reapply'),
   detectClaudeCode: () => ipcRenderer.invoke('claudecode:detect'),
+  detectWhisper: () => ipcRenderer.invoke('whisper:detect'),
+  downloadWhisperModel: (file) => ipcRenderer.invoke('whisper:download', file),
 
   ask: (payload) => ipcRenderer.invoke('ai:ask', payload),
   cancel: () => ipcRenderer.invoke('ai:cancel'),
@@ -63,7 +65,8 @@ contextBridge.exposeInMainWorld('veil', {
     recToggle: listener('rec:toggle'),
     recState: listener('rec:state'),
     focusInput: listener('focus:input'),
-    hotkeyErrors: listener('hotkeys:errors')
+    hotkeyErrors: listener('hotkeys:errors'),
+    whisperProgress: listener('whisper:progress')
   }
 })
 

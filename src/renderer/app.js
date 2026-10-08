@@ -294,7 +294,12 @@ function applyState (next) {
   state = next
   paintRail()
   paintLegend()
-  Recorder.setConfig(state.config.transcription)
+  Recorder.setConfig({
+    ...state.config.transcription,
+    // Decides the audio format the recorder hands over: WAV for on-device
+    // whisper.cpp, Opus for anything uploaded.
+    localEngine: state.transcription?.local === true
+  })
   if (window.Settings?.isOpen()) window.Settings.render(state)
 }
 

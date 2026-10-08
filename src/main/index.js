@@ -17,6 +17,14 @@ const ai = require('./ai')
 const DEV = process.argv.includes('--dev')
 let tray = null
 
+// Last line of defence. Hotkeys fire async work that nobody awaits, so a
+// rejection that slips through would otherwise only ever appear in a terminal
+// the user does not have open.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandled rejection]', reason)
+  overlay.send('toast', { kind: 'error', text: String(reason?.message || reason) })
+})
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -228,6 +236,14 @@ app.whenReady().then(() => {
   // pulls the bundle into the OS page cache.
   if (store.readConfig().chat.provider === 'claudecode') {
     require('./ai/claude-code').detect(store.readConfig().chat.claudeCode.binaryPath)
+      .catch(() => {})
+  }
+
+  // Same idea for on-device speech: whisper.cpp re-reads the model file on
+  // every pass, so a cold page cache costs ~10s on the first chunk against
+  // ~1s warm. Reading it through once is free.
+  if (store.readConfig().transcription.provider === 'local') {
+    require('./whisper-cpp').warm(store.readConfig().transcription.whisperCpp || {})
       .catch(() => {})
   }
 

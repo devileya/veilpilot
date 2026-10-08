@@ -10,7 +10,7 @@ window.Recorder = (() => {
     'audio/mp4'
   ]
 
-  let config = { inputDeviceId: '', captureSystemAudio: false, chunkSeconds: 0 }
+  let config = { inputDeviceId: '', captureSystemAudio: false, chunkSeconds: 0, localEngine: false }
   let hooks = {}
   let mime = ''
   let active = null       // { stream, cleanup }
@@ -83,12 +83,76 @@ window.Recorder = (() => {
     }
   }
 
+  /* whisper.cpp only reads 16 kHz mono PCM, so the Opus the recorder produces
+     is decoded and resampled here. Web Audio does both, which keeps ffmpeg
+     off the dependency list — it would be one more thing to install on
+     Windows. Cloud providers keep getting the smaller Opus blob. */
+  function encodeWav (samples, sampleRate) {
+    const buffer = new ArrayBuffer(44 + samples.length * 2)
+    const view = new DataView(buffer)
+    const ascii = (offset, text) => {
+      for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i))
+    }
+
+    ascii(0, 'RIFF')
+    view.setUint32(4, 36 + samples.length * 2, true)
+    ascii(8, 'WAVE')
+    ascii(12, 'fmt ')
+    view.setUint32(16, 16, true)   // PCM header size
+    view.setUint16(20, 1, true)    // format: PCM
+    view.setUint16(22, 1, true)    // mono
+    view.setUint32(24, sampleRate, true)
+    view.setUint32(28, sampleRate * 2, true)
+    view.setUint16(32, 2, true)    // block align
+    view.setUint16(34, 16, true)   // bits per sample
+    ascii(36, 'data')
+    view.setUint32(40, samples.length * 2, true)
+
+    let offset = 44
+    for (let i = 0; i < samples.length; i++) {
+      const sample = Math.max(-1, Math.min(1, samples[i]))
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
+      offset += 2
+    }
+    return new Uint8Array(buffer)
+  }
+
+  async function toWav16k (blob) {
+    const context = new AudioContext()
+    let decoded
+    try {
+      decoded = await context.decodeAudioData(await blob.arrayBuffer())
+    } finally {
+      context.close().catch(() => {})
+    }
+    // Whisper gives nonsense on fragments; a tap on the hotkey is not speech.
+    if (decoded.duration < 0.4) return null
+
+    const offline = new OfflineAudioContext(1, Math.ceil(decoded.duration * 16000), 16000)
+    const source = offline.createBufferSource()
+    source.buffer = decoded
+    source.connect(offline.destination) // stereo downmixes to mono here
+    source.start()
+    const rendered = await offline.startRendering()
+    return encodeWav(rendered.getChannelData(0), 16000)
+  }
+
   async function upload (blob) {
     uploading += 1
     emit()
     try {
-      const bytes = new Uint8Array(await blob.arrayBuffer())
-      const result = await window.veil.transcribe(bytes, blob.type)
+      let bytes = null
+      let mime = blob.type
+
+      if (config.localEngine) {
+        bytes = await toWav16k(blob)
+        if (!bytes) return
+        mime = 'audio/wav'
+      } else {
+        bytes = new Uint8Array(await blob.arrayBuffer())
+      }
+
+      const result = await window.veil.transcribe(bytes, mime)
       if (result && !result.ok && result.error) hooks.onError?.(result.error)
     } catch (err) {
       hooks.onError?.(err.message || String(err))
@@ -179,5 +243,5 @@ window.Recorder = (() => {
   const toggle = () => (recording ? stop() : start())
   const state = () => ({ recording, uploading: uploading > 0 })
 
-  return { init, setConfig, toggle, start, stop, state, devices }
+  return { init, setConfig, toggle, start, stop, state, devices, toWav16k }
 })()

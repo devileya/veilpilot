@@ -49,13 +49,25 @@ function fail (id, message, meta = {}) {
   return { ok: false, error: message }
 }
 
-async function ask ({ promptId, input, shotIds = [] } = {}) {
+// Callers fire this without awaiting, so it must never reject: an error has
+// to become an error card, not an unhandled rejection in the terminal.
+async function ask (opts = {}) {
+  const id = `req_${++seq}`
+  try {
+    return await run(id, opts)
+  } catch (err) {
+    console.error('[ai]', err)
+    active = null
+    return fail(id, err?.message || String(err))
+  }
+}
+
+async function run (id, { promptId, input, shotIds = [] } = {}) {
   cancel()
 
   const cfg = store.readConfig()
   const provider = store.resolve('chat')
   const prompt = buildPrompt({ promptId, input })
-  const id = `req_${++seq}`
 
   if (!prompt.text) return fail(id, 'Nothing to ask — type something or attach a screenshot.')
   if (provider.needsKey && !provider.apiKey) {

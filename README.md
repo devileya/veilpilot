@@ -94,6 +94,7 @@ set `CSC_LINK` / `CSC_KEY_PASSWORD` and `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWOR
   prompt; if you miss it, Settings › Capture has a button to the right pane in System
   Settings. You must quit and relaunch the app after granting it.
 - **macOS, Microphone** — required for transcription, requested on first recording.
+- **whisper.cpp** — `brew install whisper-cpp` for on-device speech to text (the default).
 - **Windows** — no prompts; screenshots and the microphone work directly.
 
 ---
@@ -196,17 +197,48 @@ whatever was on screen. And a GUI app does not inherit your shell `PATH`, so Vei
 probes the usual install locations (`~/.local/bin`, `~/.claude/bin`, `~/.claude/local`,
 Homebrew, npm global); if yours lives somewhere else, name it in Settings › AI.
 
-### Transcription is a separate provider
+### Speech to text runs on your machine by default
 
-Anthropic has no speech-to-text endpoint. "Chat on Claude, transcribe on Groq" is a normal
-setup, not a misconfiguration — Settings › Voice has its own provider, model and key.
-Any OpenAI-compatible `POST /audio/transcriptions` works. Groq's
-`whisper-large-v3-turbo` is the cheap, fast default worth trying.
+The default transcription engine is **whisper.cpp, on-device**. Meeting audio is never
+uploaded anywhere, which is the same promise the invisible panel makes about your screen.
+There is no API key and no per-minute cost.
 
-**Chunk length** decides the trade: `0` uploads once when you stop recording and is the
-most accurate; `15`–`30` gives a rolling transcript during a long call. Each chunk is a
-standalone recording, not a slice, because slices of one recording are not independently
-decodable and the API rejects them.
+```bash
+brew install whisper-cpp     # macOS; Windows builds at github.com/ggml-org/whisper.cpp
+```
+
+Then open Settings › Voice and download a model — the panel lists tiny/base/small/medium
+with sizes and a download button, and stores them beside your config. **small** (488 MB)
+is the right default for anything other than English; `base` is faster but noticeably
+weaker on Indonesian.
+
+Measured here on an M-series Mac with `small`, on a 5-second clip:
+
+| | time |
+|---|---|
+| First pass after launch (model cold on disk) | ~10 s |
+| Warm, language auto-detected | ~1.6 s |
+| Warm, language set explicitly (`id`) | ~0.8 s |
+
+So: set the language in Settings › Voice rather than leaving it on auto — it is about 40%
+faster and more reliable on short clips. VeilPilot reads the model file through once at
+startup to take the cold first pass out of your first chunk.
+
+whisper.cpp only accepts 16 kHz mono PCM, so VeilPilot decodes and resamples the
+recording with the Web Audio API before handing it over. That keeps ffmpeg off the
+dependency list — one less thing to install, especially on Windows.
+
+### Cloud transcription, if you want it
+
+Settings › Voice can also point at any OpenAI-compatible `POST /audio/transcriptions` —
+OpenAI, Groq (`whisper-large-v3-turbo` is cheap and fast), or your own server. Note that
+Anthropic has no speech-to-text endpoint, so "chat on Claude, transcribe locally" (or on
+Groq) is a normal setup, not a misconfiguration.
+
+**Chunk length** decides the trade: `0` transcribes once when you stop recording and is
+the most accurate; `15`–`30` gives a rolling transcript during a long call and keeps the
+local model warm. Each chunk is a standalone recording, not a slice, because slices of one
+recording are not independently decodable.
 
 ### System audio (hearing the other side)
 
@@ -240,7 +272,8 @@ src/main/        Electron main process
   capture.js       desktopCapturer + the region picker
   session.js       conversation, screenshots, transcript
   hotkeys.js       global shortcut registration and failure reporting
-  transcribe.js    audio upload to an OpenAI-compatible speech endpoint
+  transcribe.js    routes audio to the local engine or a cloud endpoint
+  whisper-cpp.js   on-device speech to text: detect, model download, run
   store.js         config.json + OS-keystore secrets
   ipc.js           every renderer-facing handler
   ai/              provider adapters + dispatch
