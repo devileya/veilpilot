@@ -5,8 +5,9 @@ const session = require('../session')
 const overlay = require('../overlay')
 const openai = require('./openai')
 const anthropic = require('./anthropic')
+const claudecode = require('./claude-code')
 
-const ADAPTERS = { openai, anthropic }
+const ADAPTERS = { openai, anthropic, claudecode }
 
 let active = null
 let seq = 0
@@ -60,7 +61,10 @@ async function ask ({ promptId, input, shotIds = [] } = {}) {
   if (provider.needsKey && !provider.apiKey) {
     return fail(id, `No API key for ${provider.label}. Open settings › Keys and paste one.`)
   }
-  if (!provider.model) return fail(id, `No model set for ${provider.label}. Add one in Settings.`)
+  // Claude Code picks its own model when none is named, so a blank is valid.
+  if (!provider.model && provider.kind !== 'claudecode') {
+    return fail(id, `No model set for ${provider.label}. Add one in Settings.`)
+  }
 
   const shots = shotIds.map((sid) => session.getShot(sid)).filter(Boolean)
   const notes = []
@@ -92,12 +96,15 @@ async function ask ({ promptId, input, shotIds = [] } = {}) {
     }))
   })
 
+  const claude = provider.kind === 'claudecode' ? session.claudeSession() : null
+
   const options = {
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
     model: prompt.model || provider.model,
     system: cfg.chat.systemPrompt,
-    messages: session.history(),
+    // Claude Code keeps the history itself, so it gets the newest turn only.
+    messages: claude ? session.history().slice(-1) : session.history(),
     maxTokens: cfg.chat.maxTokens || 8192,
     signal: controller.signal,
     ...(provider.kind === 'anthropic'
@@ -105,6 +112,15 @@ async function ask ({ promptId, input, shotIds = [] } = {}) {
           effort: prompt.effort || cfg.chat.effort || 'medium',
           showThinking: cfg.chat.showThinking !== false,
           serverSideFallback: cfg.chat.serverSideFallback !== false
+        }
+      : {}),
+    ...(claude
+      ? {
+          ...cfg.chat.claudeCode,
+          effort: prompt.effort || cfg.chat.effort || 'medium',
+          showThinking: cfg.chat.showThinking !== false,
+          sessionId: claude.started ? null : claude.id,
+          resumeId: claude.started ? claude.id : null
         }
       : {})
   }
@@ -122,12 +138,16 @@ async function ask ({ promptId, input, shotIds = [] } = {}) {
         overlay.send('ai:note', { id, text: chunk.text })
       } else if (chunk.type === 'done') {
         session.pushTurn({ role: 'assistant', text: answer, images: [] })
+        // Only now is the Claude Code session real and resumable; a failed
+        // first attempt must still be able to name it.
+        if (claude) session.markClaudeStarted()
         active = null
         overlay.send('ai:end', {
           id,
           stopReason: chunk.stopReason,
           usage: chunk.usage,
-          model: chunk.model
+          model: chunk.model,
+          costUsd: chunk.costUsd
         })
         return { ok: true, id }
       }

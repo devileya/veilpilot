@@ -11,6 +11,8 @@ window.Settings = (() => {
   let tab = 'ai'
   let open = false
   let devices = []
+  let claudeCodeStatus = null
+  let claudeCodeProbe = null
 
   const esc = (value) => Markdown.escape(value ?? '')
 
@@ -89,22 +91,56 @@ window.Settings = (() => {
 
   /* ---------- views ---------- */
 
+  function viewClaudeCode () {
+    const cc = current.config.chat.claudeCode
+    const found = claudeCodeStatus
+
+    const status = !found
+      ? '<p class="fieldHint" style="margin-bottom:14px">Looking for the CLI…</p>'
+      : found.ok
+        ? `<p class="fieldHint" style="margin-bottom:14px">Found <b>${esc(found.version)}</b> at <b>${esc(found.path)}</b>. Using the login it already has — no API key needed.</p>`
+        : `<p class="fieldHint" style="margin-bottom:14px;color:var(--live)">${esc(found.error)}</p>`
+
+    return [
+      status,
+      field('Binary path', text('chat.claudeCode.binaryPath', cc.binaryPath, found?.path || 'auto-detect'),
+        'Only needed if auto-detection fails. A GUI app does not inherit your shell PATH, so an unusual install location has to be named here.'),
+      field('Working directory', text('chat.claudeCode.cwd', cc.cwd, 'temp directory'),
+        'Where Claude Code runs. Leave blank unless you want it to see a specific project.'),
+      field('Fast start', check('chat.claudeCode.fastStart', cc.fastStart !== false,
+        'Skip hooks, MCP servers, plugins and CLAUDE.md'),
+        'Measured here: <b>~11s</b> to first token without it, <b>~1.5s</b> with it. Leave it on for live use.'),
+      field('Tools', check('chat.claudeCode.allowTools', !!cc.allowTools,
+        'Let it read files and run commands'),
+        'Off means answers only — it never touches your disk. On makes "fix this" far stronger but slower, and anything needing permission is denied automatically since nobody is there to approve it.'),
+      field('Spend cap (USD)', `<input type="number" data-path="chat.claudeCode.maxBudgetUsd" value="${cc.maxBudgetUsd ?? 0}" min="0" max="100" step="0.05" />`,
+        'Per ask. <b>0</b> means no cap. Real cost is reported on every answer.')
+    ].join('')
+  }
+
   function viewAi () {
     const chat = current.config.chat
     const provider = current.providers.find((p) => p.id === chat.provider) || {}
     const isClaude = provider.kind === 'anthropic'
+    const isClaudeCode = provider.kind === 'claudecode'
 
     return [
       '<p class="sectionLabel">Answers</p>',
       field('Provider', select('chat.provider', chat.provider,
         current.providers.map((p) => [p.id, p.label]))),
-      `<div class="row">
-        ${field('Model', text('chat.model', chat.model, provider.model || 'model id'))}
-        ${field('Max tokens', number('chat.maxTokens', chat.maxTokens, 256, 128000))}
-      </div>`,
-      field('Base URL', text('chat.baseUrl', chat.baseUrl, provider.baseUrl || ''),
-        'Leave blank to use the provider default. Any OpenAI-compatible server works here.'),
-      isClaude
+      isClaudeCode
+        ? field('Model', text('chat.model', chat.model, 'whatever Claude Code uses'),
+            'An alias such as <b>sonnet</b> or <b>opus</b>, or a full model id. Blank keeps the CLI default.')
+        : `<div class="row">
+            ${field('Model', text('chat.model', chat.model, provider.model || 'model id'))}
+            ${field('Max tokens', number('chat.maxTokens', chat.maxTokens, 256, 128000))}
+          </div>`,
+      isClaudeCode ? viewClaudeCode() : '',
+      !isClaudeCode
+        ? field('Base URL', text('chat.baseUrl', chat.baseUrl, provider.baseUrl || ''),
+            'Leave blank to use the provider default. Any OpenAI-compatible server works here.')
+        : '',
+      isClaude || isClaudeCode
         ? field('Effort', select('chat.effort', chat.effort, [
             ['low', 'low — fastest'],
             ['medium', 'medium'],
@@ -285,6 +321,23 @@ window.Settings = (() => {
     for (const node of tabs.children) {
       node.classList.toggle('is-on', node.dataset.tab === tab)
     }
+    probeClaudeCode()
+  }
+
+  // Finding the CLI touches the filesystem, so it runs once per binary-path
+  // value rather than on every render. The guard also stops the re-render it
+  // triggers from looping.
+  async function probeClaudeCode () {
+    const chat = current?.config.chat
+    if (!chat) return
+    const provider = current.providers.find((p) => p.id === chat.provider)
+    if (provider?.kind !== 'claudecode') return
+
+    const key = chat.claudeCode.binaryPath || '(auto)'
+    if (claudeCodeProbe === key) return
+    claudeCodeProbe = key
+    claudeCodeStatus = await window.veil.detectClaudeCode()
+    if (open && tab === 'ai') rebuild()
   }
 
   /* ---------- events ---------- */
@@ -307,8 +360,9 @@ window.Settings = (() => {
       const value = node.type === 'checkbox'
         ? node.checked
         : node.type === 'number' ? Number(node.value) : node.value
-      // Switching provider changes which fields are relevant.
-      const structural = path.endsWith('.provider')
+      // Switching provider changes which fields are relevant; a new binary
+      // path has to be re-probed.
+      const structural = path.endsWith('.provider') || path === 'chat.claudeCode.binaryPath'
       await window.veil.setConfig(nest(path, value))
       await hooks.refresh?.()
       if (structural) rebuild()

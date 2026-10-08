@@ -3,9 +3,10 @@
 const mod = process.platform === 'darwin' ? 'Command' : 'Control'
 const acc = (suffix) => `${mod}+Shift+${suffix}`
 
-// Two request shapes cover every provider worth supporting:
-//   kind: 'openai'    -> POST {baseUrl}/chat/completions, SSE deltas
-//   kind: 'anthropic' -> official @anthropic-ai/sdk
+// Three request shapes cover every provider worth supporting:
+//   kind: 'openai'     -> POST {baseUrl}/chat/completions, SSE deltas
+//   kind: 'anthropic'  -> official @anthropic-ai/sdk
+//   kind: 'claudecode' -> the local `claude` CLI in headless stream-json mode
 // Anything OpenAI-compatible (Groq, OpenRouter, DeepSeek, Ollama, LM Studio,
 // vLLM) is therefore just a baseUrl + model, not new code.
 const PROVIDERS = {
@@ -29,6 +30,18 @@ const PROVIDERS = {
     // transcription points at any OpenAI-compatible /audio/transcriptions.
     transcription: false,
     keyUrl: 'https://console.anthropic.com/settings/keys'
+  },
+  claudecode: {
+    label: 'Claude Code',
+    kind: 'claudecode',
+    baseUrl: '',
+    // Empty means "whatever Claude Code is already set to" — the CLI picks.
+    model: '',
+    vision: true,
+    transcription: false,
+    // Reuses the login the CLI already has; no key lives in VeilPilot.
+    needsKey: false,
+    keyUrl: 'https://code.claude.com/docs/en/quickstart'
   },
   glm: {
     label: 'GLM (Zhipu)',
@@ -187,7 +200,15 @@ const CONFIG = {
     maxTokens: 8192,
     systemPrompt: SYSTEM_PROMPT,
     serverSideFallback: true,
-    showThinking: true
+    showThinking: true,
+    claudeCode: {
+      binaryPath: '',     // '' -> probe PATH and the usual install locations
+      cwd: '',            // '' -> the OS temp dir, so no project is implied
+      fastStart: true,    // --safe-mode --strict-mcp-config: skips hooks, MCP,
+                          // plugins and CLAUDE.md. ~11s -> ~1.5s to first token.
+      allowTools: false,  // --tools "": answers only, never touches the disk
+      maxBudgetUsd: 0     // 0 -> no cap
+    }
   },
   transcription: {
     provider: 'openai',

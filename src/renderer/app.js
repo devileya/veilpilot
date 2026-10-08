@@ -105,11 +105,14 @@ function paintLegend () {
 
   const chat = state.config.chat
   const provider = state.providers.find((p) => p.id === chat.provider)
-  const model = chat.model || provider?.model || '—'
+  const label = Markdown.escape(provider?.label || chat.provider)
+  // Claude Code picks its own model when none is named, so there is nothing
+  // honest to print after the provider name.
+  const model = chat.model || provider?.model || ''
   const keyed = state.keys[chat.provider] || provider?.needsKey === false
   el.legendFoot.innerHTML = keyed
-    ? `Answering with <b>${Markdown.escape(provider?.label || chat.provider)}</b> · ${Markdown.escape(model)}`
-    : `No API key for <b>${Markdown.escape(provider?.label || chat.provider)}</b> yet — open <b>settings</b> to add one.`
+    ? `Answering with <b>${label}</b>${model ? ` · ${Markdown.escape(model)}` : ''}`
+    : `No API key for <b>${label}</b> yet — open <b>settings</b> to add one.`
 }
 
 const showLegend = (show) => { el.legend.hidden = !show }
@@ -146,6 +149,7 @@ function newCard (meta) {
     id: meta.id,
     node,
     body: node.querySelector('.body'),
+    meta: node.querySelector('.meta'),
     think: node.querySelector('.think'),
     notes: node.querySelector('.notes'),
     foot: node.querySelector('.cardFoot'),
@@ -200,6 +204,14 @@ function finishCard (info) {
     card.body.innerHTML = Markdown.render(card.text) ||
       '<p class="note">No text came back.</p>'
     card.foot.hidden = !card.text
+  }
+
+  // The real model and cost are only known once the turn ends — Claude Code
+  // in particular picks its own model unless one is named.
+  if (info?.model || info?.costUsd != null) {
+    const bits = [info.model, clock()]
+    if (info.costUsd != null) bits.push(`$${Number(info.costUsd).toFixed(4)}`)
+    card.meta.textContent = bits.filter(Boolean).join(' · ')
   }
 
   if (info?.cancelled) addNote('Stopped.')

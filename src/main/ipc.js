@@ -8,6 +8,7 @@ const capture = require('./capture')
 const hotkeys = require('./hotkeys')
 const transcribe = require('./transcribe')
 const ai = require('./ai')
+const claudeCode = require('./ai/claude-code')
 const { PROVIDERS } = require('./defaults')
 
 let handlers = {}
@@ -80,6 +81,9 @@ function register (appHandlers) {
   })
 
   ipcMain.handle('hotkeys:reapply', () => reapplyHotkeys())
+
+  ipcMain.handle('claudecode:detect', () =>
+    claudeCode.detect(store.readConfig().chat.claudeCode.binaryPath))
 
   /* ---------- asking ---------- */
 

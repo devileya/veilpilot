@@ -223,6 +223,14 @@ app.whenReady().then(() => {
   refreshTray()
   tray.on('click', handlers.toggleOverlay)
 
+  // The CLI is a large bundle, so the first ask of a session pays ~7s of cold
+  // start against ~1.5s warm. `--version` costs nothing and no tokens, but it
+  // pulls the bundle into the OS page cache.
+  if (store.readConfig().chat.provider === 'claudecode') {
+    require('./ai/claude-code').detect(store.readConfig().chat.claudeCode.binaryPath)
+      .catch(() => {})
+  }
+
   const failures = ipc.reapplyHotkeys()
   if (failures.length) {
     console.warn('[hotkeys] unavailable:', failures.map((f) => f.accelerator).join(', '))

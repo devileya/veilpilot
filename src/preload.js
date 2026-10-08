@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('veil', {
   setConfig: (patch) => ipcRenderer.invoke('config:set', patch),
   setKey: (provider, key) => ipcRenderer.invoke('secrets:set', { provider, key }),
   reapplyHotkeys: () => ipcRenderer.invoke('hotkeys:reapply'),
+  detectClaudeCode: () => ipcRenderer.invoke('claudecode:detect'),
 
   ask: (payload) => ipcRenderer.invoke('ai:ask', payload),
   cancel: () => ipcRenderer.invoke('ai:cancel'),

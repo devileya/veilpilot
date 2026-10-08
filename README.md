@@ -134,12 +134,13 @@ keeps the keyboard. Only `⌘⇧\` and `⌘⇧↩` focus the panel.
 
 ## Providers
 
-Two request shapes cover everything, so adding a provider is configuration, not code:
+Three request shapes cover everything, so adding a provider is configuration, not code:
 
 - **OpenAI-compatible** (`POST /chat/completions`) — OpenAI, GLM/Zhipu, Groq, OpenRouter,
   DeepSeek, Ollama, LM Studio, vLLM, or any custom base URL
 - **Anthropic** — the official `@anthropic-ai/sdk`, with adaptive thinking, an effort
   setting, and server-side fallback on a declined request
+- **Claude Code** — the `claude` CLI you already have, in headless mode. See below.
 
 Presets ship with a base URL and a starting model; both are editable, because model IDs
 change faster than this README. Add your key in Settings › Keys. Keys are encrypted with
@@ -149,6 +150,47 @@ the OS keystore (Keychain / DPAPI) and stored separately from `config.json` —
 Set the **effort** on a per-prompt basis: `Selesaikan` and `Review kode` ship at `high`
 because they are real problems; the rest run at the global default (`medium`) so a
 "what is this" answer comes back fast.
+
+### Claude Code as a provider
+
+Pick **Claude Code** in Settings › AI and there is no key to paste — it runs the `claude`
+CLI you already have and uses the login that CLI already holds. VeilPilot stores no
+credential of its own for it.
+
+How it runs, and why:
+
+```
+claude -p
+  --input-format stream-json --output-format stream-json --verbose
+  --include-partial-messages          # token-by-token streaming
+  --tools ""                          # answers only; never touches your disk
+  --permission-prompts none           # nobody is there to approve, so never hang
+  --safe-mode --strict-mcp-config     # skip hooks, MCP, plugins, CLAUDE.md
+  --system-prompt <your HUD prompt>   # replaces Claude Code's coding prompt
+  --session-id <uuid>  /  --resume <uuid>
+```
+
+- **Screenshots go straight in.** `--input-format stream-json` takes base64 image blocks,
+  so a screenshot needs no temp file and no `Read` tool. Confirmed working.
+- **Follow-ups keep context.** The first ask names a session, every later one resumes it,
+  so only the newest turn is sent and Claude Code holds the history. A new session
+  (`⌘⇧K`) starts a fresh one.
+- **Fast start matters.** Measured on this machine: **~11s** to first token with hooks,
+  MCP servers and plugins loading, **~1.5s** with `--safe-mode --strict-mcp-config`. It is
+  on by default. Turn it off only if you need your MCP servers.
+- **First ask of a session is slower** (~7s) because the CLI is a large bundle and the
+  process is cold; subsequent asks in the same session run ~1.5s. VeilPilot runs
+  `claude --version` at startup to warm the page cache, which costs nothing.
+- **Real cost is reported.** Every answer's eyebrow shows the actual dollar figure the CLI
+  returns. Settings has a per-ask spend cap.
+- **Tools are off by default.** Turning them on in Settings makes "fix this" far stronger
+  but slower, and anything that would need permission is denied automatically.
+
+Two things to know. Resuming requires session persistence, so your asks are written to
+Claude Code's own session store under `~/.claude` like any other session — including
+whatever was on screen. And a GUI app does not inherit your shell `PATH`, so VeilPilot
+probes the usual install locations (`~/.local/bin`, `~/.claude/local`, Homebrew, npm
+global); if yours lives somewhere else, name it in Settings › AI.
 
 ### Transcription is a separate provider
 
@@ -197,7 +239,10 @@ src/main/        Electron main process
   transcribe.js    audio upload to an OpenAI-compatible speech endpoint
   store.js         config.json + OS-keystore secrets
   ipc.js           every renderer-facing handler
-  ai/              provider adapters (openai.js, anthropic.js) + dispatch
+  ai/              provider adapters + dispatch
+    openai.js        OpenAI-compatible /chat/completions
+    anthropic.js     official @anthropic-ai/sdk
+    claude-code.js   the local `claude` CLI, headless stream-json
 src/renderer/    the panel: app.js, settings.js, recorder.js, markdown.js
 src/region/      the drag-to-select overlay
 build/           make-icons.js writes the tray and app icons at install time

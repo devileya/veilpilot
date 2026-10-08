@@ -1,5 +1,6 @@
 'use strict'
 
+const { randomUUID } = require('node:crypto')
 const store = require('./store')
 
 const MAX_TURNS = 16
@@ -11,6 +12,8 @@ let turns = []
 let shots = []
 let transcript = []
 let shotSeq = 0
+// Claude Code keeps its own conversation; we only hold the handle to it.
+let claude = { id: null, started: false }
 
 function addShot (shot) {
   const id = `shot_${++shotSeq}`
@@ -57,11 +60,23 @@ function history () {
   }))
 }
 
+// First ask names a session with --session-id; every later ask resumes it, so
+// only the newest turn is sent and Claude Code holds the history.
+function claudeSession () {
+  if (!claude.id) claude.id = randomUUID()
+  return { ...claude }
+}
+
+function markClaudeStarted () {
+  claude.started = true
+}
+
 function clear () {
   turns = []
   shots = []
   transcript = []
   shotSeq = 0
+  claude = { id: null, started: false }
 }
 
 function clearTranscript () {
@@ -78,6 +93,8 @@ module.exports = {
   clearTranscript,
   pushTurn,
   history,
+  claudeSession,
+  markClaudeStarted,
   clear,
   turnCount: () => turns.length
 }
