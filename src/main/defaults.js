@@ -203,7 +203,9 @@ const HOTKEYS = {
 }
 
 const CONFIG = {
-  version: 1,
+  // Bump this and add a MIGRATIONS entry in store.js whenever a changed
+  // default must also reach installs that already have a config on disk.
+  version: 2,
   chat: {
     provider: 'openai',
     baseUrl: '',          // '' -> use the provider preset's baseUrl

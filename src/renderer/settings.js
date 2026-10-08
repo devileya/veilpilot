@@ -235,7 +235,7 @@ window.Settings = (() => {
           .map((p) => [p.id, p.transcription ? p.label : `${p.label} (no speech API)`]))),
       isLocal
         ? field('Language', text('transcription.language', voice.language, 'auto'),
-            'A language code such as <b>id</b> or <b>en</b>. Naming it is about 40% faster than auto-detect, and more reliable on short clips.')
+            'A language code such as <b>id</b> or <b>en</b>. Auto-detect is accurate on clear speech; naming it skips the detection pass and is about 40% faster.')
         : `<div class="row">
             ${field('Model', text('transcription.model', voice.model, provider.transcriptionModel || 'whisper-1'))}
             ${field('Language', text('transcription.language', voice.language, 'auto'))}

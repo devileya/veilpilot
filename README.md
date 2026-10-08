@@ -220,9 +220,10 @@ Measured here on an M-series Mac with `small`, on a 5-second clip:
 | Warm, language auto-detected | ~1.6 s |
 | Warm, language set explicitly (`id`) | ~0.8 s |
 
-So: set the language in Settings › Voice rather than leaving it on auto — it is about 40%
-faster and more reliable on short clips. VeilPilot reads the model file through once at
-startup to take the cold first pass out of your first chunk.
+Auto-detect is accurate on clear speech — it picked Indonesian at 0.98 confidence in
+testing — so setting the language in Settings › Voice is about speed, not correctness: it
+skips the detection pass. VeilPilot reads the model file through once at startup to take
+the cold first pass out of your first chunk.
 
 whisper.cpp only accepts 16 kHz mono PCM, so VeilPilot decodes and resamples the
 recording with the Web Audio API before handing it over. That keeps ffmpeg off the

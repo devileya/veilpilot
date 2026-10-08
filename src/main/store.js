@@ -27,6 +27,21 @@ function merge (base, patch) {
   return out
 }
 
+/* A saved config always beats a new default, so changing a default only
+   reaches people who have never run the app. Anything that should also reach
+   existing installs needs a migration here, indexed by the version it
+   upgrades FROM. */
+const MIGRATIONS = {
+  // 1 -> 2: transcription moved on-device. Only move people who never set a
+  // cloud key — for them cloud transcription could not have worked anyway,
+  // and anyone who did configure one keeps it.
+  1: (cfg) => {
+    if (cfg.transcription.provider === 'openai' && !getKey('openai')) {
+      cfg.transcription.provider = 'local'
+    }
+  }
+}
+
 function readConfig () {
   if (cache) return cache
   let onDisk = {}
@@ -35,7 +50,28 @@ function readConfig () {
   } catch (err) {
     if (err.code !== 'ENOENT') console.error('[store] config unreadable, using defaults:', err.message)
   }
+
   cache = merge(CONFIG, onDisk)
+
+  // No version on disk means a fresh install, which starts on the current
+  // defaults and needs no migrating.
+  const from = Number(onDisk.version) || 0
+  let migrated = false
+  for (let v = from; v > 0 && v < CONFIG.version; v++) {
+    if (!MIGRATIONS[v]) continue
+    MIGRATIONS[v](cache)
+    migrated = true
+  }
+  cache.version = CONFIG.version
+
+  if (migrated || (from && from !== CONFIG.version)) {
+    try {
+      fs.writeFileSync(configPath(), JSON.stringify(cache, null, 2))
+    } catch (err) {
+      console.error('[store] could not persist migrated config:', err.message)
+    }
+  }
+
   return cache
 }
 
