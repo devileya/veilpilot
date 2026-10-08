@@ -98,7 +98,11 @@ window.Settings = (() => {
     const status = !found
       ? '<p class="fieldHint" style="margin-bottom:14px">Looking for the CLI…</p>'
       : found.ok
-        ? `<p class="fieldHint" style="margin-bottom:14px">Found <b>${esc(found.version)}</b> at <b>${esc(found.path)}</b>. Using the login it already has — no API key needed.</p>`
+        ? `<p class="fieldHint" style="margin-bottom:14px">Found <b>${esc(found.version)}</b> at <b>${esc(found.path)}</b>.` +
+          (found.account?.loggedIn
+            ? ` Signed in as <b>${esc(found.account.email || found.account.method)}</b> — no API key needed.`
+            : ' Using the login it already has — no API key needed.') +
+          '</p>'
         : `<p class="fieldHint" style="margin-bottom:14px;color:var(--live)">${esc(found.error)}</p>`
 
     return [

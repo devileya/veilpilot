@@ -27,6 +27,8 @@ function candidatePaths () {
     const appData = process.env.APPDATA || ''
     const localAppData = process.env.LOCALAPPDATA || ''
     return [
+      path.join(home, 'claude', 'bin', 'claude.exe'),
+      path.join(home, '.claude', 'bin', 'claude.exe'),
       path.join(appData, 'npm', 'claude.cmd'),
       path.join(localAppData, 'Programs', 'claude', 'claude.exe'),
       path.join(home, '.local', 'bin', 'claude.exe'),
@@ -35,6 +37,7 @@ function candidatePaths () {
   }
   return [
     path.join(home, '.local', 'bin', 'claude'),
+    path.join(home, '.claude', 'bin', 'claude'),
     path.join(home, '.claude', 'local', 'claude'),
     '/opt/homebrew/bin/claude',
     '/usr/local/bin/claude',
@@ -76,19 +79,52 @@ function resolveBinary (configured) {
   throw new Error('Claude Code CLI not found. Install it, or set the binary path in settings › AI.')
 }
 
-function detect (configured) {
-  return new Promise((resolve) => {
-    let binary
-    try {
-      binary = resolveBinary(configured)
-    } catch (err) {
-      return resolve({ ok: false, error: err.message })
+const run = (binary, args) => new Promise((resolve) => {
+  execFile(binary, args, { timeout: 15000 }, (err, stdout) =>
+    resolve({ err, out: String(stdout || '').trim() }))
+})
+
+// Finding the binary is not enough: an installed-but-logged-out CLI fails at
+// ask time with a confusing error, so the login is checked up front.
+async function detect (configured) {
+  let binary
+  try {
+    binary = resolveBinary(configured)
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+
+  const [version, auth] = await Promise.all([
+    run(binary, ['--version']),
+    run(binary, ['auth', 'status'])
+  ])
+
+  if (version.err) {
+    return { ok: false, path: binary, error: `Could not run it: ${version.err.message}` }
+  }
+
+  let account = null
+  try {
+    const parsed = JSON.parse(auth.out)
+    account = {
+      loggedIn: !!parsed.loggedIn,
+      method: parsed.authMethod || null,
+      email: parsed.email || null
     }
-    execFile(binary, ['--version'], { timeout: 10000 }, (err, stdout) => {
-      if (err) return resolve({ ok: false, path: binary, error: `Could not run it: ${err.message}` })
-      resolve({ ok: true, path: binary, version: String(stdout).trim() })
-    })
-  })
+  } catch {
+    account = null // older CLI without `auth status`; let the ask surface it
+  }
+
+  if (account && !account.loggedIn) {
+    return {
+      ok: false,
+      path: binary,
+      version: version.out,
+      error: 'Claude Code is installed but not signed in. Run `claude auth login` in a terminal, then reopen this panel.'
+    }
+  }
+
+  return { ok: true, path: binary, version: version.out, account }
 }
 
 function buildArgs (opts) {

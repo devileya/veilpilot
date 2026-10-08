@@ -186,11 +186,15 @@ claude -p
 - **Tools are off by default.** Turning them on in Settings makes "fix this" far stronger
   but slower, and anything that would need permission is denied automatically.
 
+Settings › AI reports what it found: the version, the path, and the account you are
+signed in as (via `claude auth status`). An installed-but-logged-out CLI is caught there
+with a fix, rather than failing confusingly on your first ask mid-meeting.
+
 Two things to know. Resuming requires session persistence, so your asks are written to
 Claude Code's own session store under `~/.claude` like any other session — including
 whatever was on screen. And a GUI app does not inherit your shell `PATH`, so VeilPilot
-probes the usual install locations (`~/.local/bin`, `~/.claude/local`, Homebrew, npm
-global); if yours lives somewhere else, name it in Settings › AI.
+probes the usual install locations (`~/.local/bin`, `~/.claude/bin`, `~/.claude/local`,
+Homebrew, npm global); if yours lives somewhere else, name it in Settings › AI.
 
 ### Transcription is a separate provider
 
