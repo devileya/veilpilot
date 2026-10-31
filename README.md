@@ -81,7 +81,18 @@ reads `visible` when it is off.
 
 ## Install and run
 
-Requires a Rust toolchain ([rustup](https://rustup.rs), Rust 1.89+). On macOS, Xcode (or
+**Download** the latest build from
+[Releases](https://github.com/devileya/veilpilot/releases): a universal `.dmg` for macOS
+(Apple silicon and Intel), a `.zip` for Windows x64, and an experimental `.tar.gz` for
+Linux x64. The macOS app is not notarized — open it the first time with right-click ›
+Open. On Linux there is no capture protection (the panel shows in screen shares) and no
+tray icon.
+
+Every push to `main` is built on all three by GitHub Actions
+(`.github/workflows/build.yml`); pushing a tag `vX.Y.Z` that matches `Cargo.toml`
+publishes a release with the three downloads.
+
+**From source:** requires a Rust toolchain ([rustup](https://rustup.rs), Rust 1.89+). On macOS, Xcode (or
 its command-line tools) for the Metal shader compiler; on Windows, Visual Studio's C++
 build tools.
 

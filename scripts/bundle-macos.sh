@@ -3,6 +3,7 @@
 #
 #   scripts/bundle-macos.sh            # target/release/bundle/VeilPilot.app
 #   scripts/bundle-macos.sh --dmg      # ...plus VeilPilot-<version>.dmg
+#   SKIP_BUILD=1 scripts/bundle-macos.sh --dmg   # bundle target/release/veilpilot as is
 #
 # Signs ad-hoc unless CODESIGN_IDENTITY names a Developer ID certificate. An
 # ad-hoc signature changes on every build, so macOS asks for Screen Recording
@@ -15,7 +16,10 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 OUT=target/release/bundle
 APP="$OUT/VeilPilot.app"
 
-cargo build --release
+# CI builds a universal binary into target/release itself and sets SKIP_BUILD.
+if [[ -z "${SKIP_BUILD:-}" ]]; then
+  cargo build --release
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

@@ -1,0 +1,146 @@
+# Builds VeilPilot for macOS, Windows and Linux on every push and pull request.
+# A tag `vX.Y.Z` (matching the version in Cargo.toml) also publishes a GitHub
+# release with the three downloads.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit tests
+        run: cargo test
+      - name: Build (Apple silicon and Intel)
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/veilpilot \
+            target/aarch64-apple-darwin/release/veilpilot \
+            target/x86_64-apple-darwin/release/veilpilot
+      - name: Bundle the app and disk image
+        run: |
+          SKIP_BUILD=1 scripts/bundle-macos.sh --dmg
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir dist
+          mv "target/release/bundle/VeilPilot-${VERSION}.dmg" "dist/VeilPilot-${VERSION}-macos-universal.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          New-Item -ItemType Directory -Force dist, pkg | Out-Null
+          Copy-Item target/release/veilpilot.exe pkg/VeilPilot.exe
+          Copy-Item README.md pkg/
+          Compress-Archive -Path pkg/* -DestinationPath "dist/VeilPilot-$version-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libclang-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev \
+            libxrandr-dev libxi-dev libxtst-dev libxdo-dev \
+            libfontconfig1-dev libfreetype6-dev libasound2-dev libdbus-1-dev libssl-dev \
+            libgtk-3-dev libayatana-appindicator3-dev \
+            libpipewire-0.3-dev libspa-0.2-dev libgbm-dev libegl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit tests
+        run: cargo test
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p dist "pkg/VeilPilot-${VERSION}"
+          cp target/release/veilpilot README.md "pkg/VeilPilot-${VERSION}/"
+          tar -C pkg -czf "dist/VeilPilot-${VERSION}-linux-x64.tar.gz" "VeilPilot-${VERSION}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches Cargo.toml
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v${VERSION}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} but Cargo.toml says ${VERSION}"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'NOTES'
+          ## Downloads
+
+          | | |
+          |---|---|
+          | **macOS** 11+ (Apple silicon and Intel) | `VeilPilot-*-macos-universal.dmg` |
+          | **Windows** 10 2004+ (x64) | `VeilPilot-*-windows-x64.zip` |
+          | **Linux** x64 (experimental) | `VeilPilot-*-linux-x64.tar.gz` |
+
+          **macOS:** the app is not notarized. After dragging it to Applications, open it once
+          with right-click › Open (or run `xattr -dr com.apple.quarantine /Applications/VeilPilot.app`).
+          Then grant Screen Recording and Microphone when asked.
+
+          **Windows:** SmartScreen may warn about an unknown publisher — More info › Run anyway.
+
+          **Linux:** builds and runs, but there is no capture protection on Linux (no OS API for
+          it), so the panel **is visible** in screen shares; there is no tray icon either.
+
+          On-device speech to text uses `whisper-cli` from whisper.cpp; see the README.
+          NOTES
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "VeilPilot ${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            --generate-notes \
+            --verify-tag

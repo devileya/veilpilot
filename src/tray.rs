@@ -37,6 +37,10 @@ pub struct Tray {
 impl Tray {
     /// Must run on the main thread after the app has finished launching.
     pub fn new(cfg: &Config, on_command: impl Fn(TrayCommand) + Send + Sync + Clone + 'static) -> anyhow::Result<Self> {
+        if cfg!(target_os = "linux") {
+            // tray-icon needs a running GTK main loop on Linux; GPUI has its own.
+            anyhow::bail!("no tray icon on Linux; use the hotkeys");
+        }
         let toggle = MenuItem::with_id("toggle", "", true, None);
         let record = MenuItem::with_id("record", "", true, None);
         let new_session = MenuItem::with_id("new", "", true, None);
