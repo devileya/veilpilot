@@ -356,6 +356,8 @@ def run(app, base, mock_dir, data):
             check("on-device whisper.cpp transcribes speech", "deploy" in out.lower(), out)
         else:
             print("  [skip] whisper.cpp or a model is not installed")
+        if list((data / "models").glob("ggml-*.bin")) and shutil.which("whisper-cli"):
+            pause_test(app, data)
         app.set_config({"transcription": {"provider": "custom", "baseUrl": f"{base}/v1", "model": "whisper-1"}})
         out = app.send("transcribe", str(wav))
         req = requests(mock_dir)[-1]
@@ -373,6 +375,49 @@ def run(app, base, mock_dir, data):
         check("Claude Code answers", "PINEAPPLE" in card["text"] and "$" in card["meta"], card)
         card = app.ask("Which word did I just ask you to reply with? One word.")
         check("Claude Code resumes the session", "PINEAPPLE" in card["text"].upper(), card)
+
+
+def pause_test(app, data):
+    """Three sentences with 2.5 s pauses (and a 0.7 s breath inside the second)
+    fed in as a live microphone: each should be transcribed while recording
+    goes on, and the breath should not split a sentence."""
+    import wave
+    sentences = ["Selamat pagi semua, mari kita mulai rapatnya.", "Rilis versi dua dijadwalkan hari Jumat,",
+                 "setelah pengujian selesai.", "Terakhir, anggaran pemasaran perlu disetujui minggu ini."]
+    frames = []
+    for n, text in enumerate(sentences):
+        aiff, wav = data / f"p{n}.aiff", data / f"p{n}.wav"
+        subprocess.run(["say", "-v", "Damayanti", text, "-o", str(aiff)], check=True)
+        subprocess.run(["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", str(aiff), str(wav)], check=True)
+        with wave.open(str(wav)) as w:
+            frames.append(w.readframes(w.getnframes()))
+    gap = lambda s: b"\0\0" * int(16000 * s)
+    audio = gap(0.5) + frames[0] + gap(2.5) + frames[1] + gap(0.7) + frames[2] + gap(2.5) + frames[3] + gap(1.0)
+    path = data / "meeting.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(audio)
+
+    app.set_config({"transcription": {"provider": "local", "language": "id", "chunkSeconds": 0, "pauseSeconds": 1.5}})
+    app.send("action", "NewSession")
+    app.send("feed", str(path), "2")
+    live = 0
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        s = app.state()
+        live = max(live, len(s["transcript"]) if s["recording"] else 0)
+        if len(s["transcript"]) >= 3:
+            break
+        time.sleep(0.2)
+    app.send("action", "RecordToggle")
+    app.idle()
+    lines = app.state()["transcript"]
+    check("pauses transcribe while recording continues", live >= 2, (live, lines))
+    check("a short breath does not split a sentence", len(lines) == 3, lines)
+    check("lines arrive in spoken order", len(lines) == 3 and lines[0].startswith("Selamat")
+          and "jumat" in lines[1].lower() and "pengujian" in lines[1].lower() and lines[2].startswith("Terakhir"), lines)
 
 
 if __name__ == "__main__":

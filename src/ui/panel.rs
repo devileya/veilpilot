@@ -78,8 +78,18 @@ struct ActiveAsk {
 
 struct Recording {
     recorder: Recorder,
-    rollover: Option<Task<()>>,
+    /// Watches the recorder for pauses and length limits.
+    _poller: Task<()>,
+    /// Segments in the order they were spoken; one worker transcribes them
+    /// one at a time, so lines land in the transcript in order.
+    queue: futures::channel::mpsc::UnboundedSender<Vec<(Vec<f32>, u32)>>,
+    error_reported: bool,
 }
+
+/// How often the recorder is checked for a pause.
+const SEGMENT_POLL: Duration = Duration::from_millis(150);
+/// With pause cuts on and no chunk length, a monologue still gets cut here.
+const DEFAULT_MAX_SEGMENT_SECONDS: f64 = 60.0;
 
 #[derive(Clone, Copy)]
 enum ShotMode {
@@ -1035,7 +1045,6 @@ impl Panel {
 
         let device = self.cfg.transcription.input_device_id.clone();
         let system_audio = self.cfg.transcription.capture_system_audio;
-        let seconds = self.cfg.transcription.chunk_seconds;
         let (recorder, warning) = match Recorder::start(&device, system_audio) {
             Ok(r) => r,
             Err(err) => {
@@ -1046,77 +1055,108 @@ impl Panel {
         if let Some(warning) = warning {
             self.toast(ToastKind::Error, warning, cx);
         }
+        self.begin_recording(recorder, cx);
+    }
 
-        // Rolling chunks: the buffer is taken every N seconds, so a long call
-        // gets a running transcript and the local model stays warm.
-        let rollover = (seconds >= 5).then(|| {
-            cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(seconds as u64)).await;
-                    let alive = this
-                        .update(cx, |this, cx| {
-                            if this.recording.is_some() {
-                                this.flush_segment(cx);
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .unwrap_or(false);
-                    if !alive {
-                        break;
+    /// When a segment is cut while recording: at a pause, at the chunk
+    /// length, or (with neither) only when recording stops.
+    fn segment_policy(&self) -> audio::SegmentPolicy {
+        let t = &self.cfg.transcription;
+        let pause_seconds = t.pause_seconds.max(0.0) as f64;
+        let max_seconds = if t.chunk_seconds >= 5 {
+            t.chunk_seconds as f64
+        } else if pause_seconds > 0.0 {
+            DEFAULT_MAX_SEGMENT_SECONDS
+        } else {
+            0.0
+        };
+        audio::SegmentPolicy { pause_seconds, max_seconds }
+    }
+
+    /// Start recording from `recorder` (a microphone, or the dev channel's
+    /// simulated one).
+    pub fn begin_recording(&mut self, recorder: Recorder, cx: &mut Context<Self>) {
+        let (queue, mut segments) = futures::channel::mpsc::unbounded::<Vec<(Vec<f32>, u32)>>();
+
+        // The worker outlives the recording so the last segments still finish
+        // after stop; it ends once the queue is closed and drained.
+        cx.spawn(async move |this, cx| {
+            while let Some(parts) = segments.next().await {
+                let job = this.update(cx, |this, _| transcribe::job(&this.cfg, &this.secrets)).ok();
+                let result = match job {
+                    None => break,
+                    Some(Err(err)) => Err(err),
+                    Some(Ok(job)) => match cx.background_spawn(async move { audio::encode_segment(parts) }).await {
+                        // Too short to be speech; a mis-tap on the hotkey.
+                        None => Ok(String::new()),
+                        Some(wav) => crate::runtime::spawn(transcribe::run(job, wav))
+                            .await
+                            .unwrap_or_else(|e| Err(anyhow::anyhow!("transcription task failed: {e}"))),
+                    },
+                };
+                let _ = this.update(cx, |this, cx| {
+                    this.uploading = this.uploading.saturating_sub(1);
+                    match result {
+                        Ok(text) => this.append_transcript(&text, cx),
+                        Err(err) => this.toast(ToastKind::Error, format!("{err:#}"), cx),
                     }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+
+        let poller = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SEGMENT_POLL).await;
+                let alive = this.update(cx, |this, cx| this.poll_recording(cx)).unwrap_or(false);
+                if !alive {
+                    break;
                 }
-            })
+            }
         });
-        self.recording = Some(Recording { recorder, rollover });
+        self.recording = Some(Recording { recorder, _poller: poller, queue, error_reported: false });
         cx.notify();
     }
 
-    fn stop_recording(&mut self, cx: &mut Context<Self>) {
-        self.flush_segment(cx);
-        if let Some(mut recording) = self.recording.take() {
-            recording.rollover.take();
+    /// Returns whether a recording is still running.
+    fn poll_recording(&mut self, cx: &mut Context<Self>) -> bool {
+        let policy = self.segment_policy();
+        let Some(recording) = self.recording.as_mut() else { return false };
+        let error = if recording.error_reported { None } else { recording.recorder.error() };
+        if error.is_some() {
+            recording.error_reported = true;
         }
-        cx.notify();
-    }
-
-    /// Send whatever has been recorded so far to transcription.
-    fn flush_segment(&mut self, cx: &mut Context<Self>) {
-        let Some(recording) = &self.recording else { return };
-        let error = recording.recorder.error();
-        let parts = recording.recorder.take();
+        let segment = recording.recorder.poll(policy);
         if let Some(error) = error {
             self.toast(ToastKind::Error, format!("Recorder error: {error}"), cx);
         }
-        let job = match transcribe::job(&self.cfg, &self.secrets) {
-            Ok(job) => job,
-            Err(err) => {
-                self.toast(ToastKind::Error, err.to_string(), cx);
-                return;
-            }
-        };
-        self.uploading += 1;
+        if let Some(segment) = segment {
+            self.enqueue_segment(segment, cx);
+        }
+        true
+    }
+
+    fn enqueue_segment(&mut self, segment: audio::Segment, cx: &mut Context<Self>) {
+        // Silence is not sent: Whisper invents words for it.
+        if !segment.speech {
+            return;
+        }
+        let Some(recording) = &self.recording else { return };
+        if recording.queue.unbounded_send(segment.parts).is_ok() {
+            self.uploading += 1;
+            cx.notify();
+        }
+    }
+
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        let rest = self.recording.as_ref().map(|r| r.recorder.finish());
+        if let Some(rest) = rest {
+            self.enqueue_segment(rest, cx);
+        }
+        // Dropping the recording stops the device and closes the queue.
+        self.recording = None;
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let wav = cx.background_spawn(async move { audio::encode_segment(parts) }).await;
-            let result = match wav {
-                // Too short to be speech; a mis-tap on the hotkey.
-                None => Ok(String::new()),
-                Some(wav) => crate::runtime::spawn(transcribe::run(job, wav))
-                    .await
-                    .unwrap_or_else(|e| Err(anyhow::anyhow!("transcription task failed: {e}"))),
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.uploading = this.uploading.saturating_sub(1);
-                match result {
-                    Ok(text) => this.append_transcript(&text, cx),
-                    Err(err) => this.toast(ToastKind::Error, format!("{err:#}"), cx),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     pub fn append_transcript(&mut self, text: &str, cx: &mut Context<Self>) {

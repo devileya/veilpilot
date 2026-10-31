@@ -163,7 +163,6 @@ impl SettingsView {
         }
     }
 
-
     /// Scroll the body to `y` points from the top (dev control channel).
     pub fn scroll_to(&mut self, y: f32, cx: &mut Context<Self>) {
         self.scroll.set_offset(gpui::point(px(0.), px(-y)));
@@ -352,6 +351,12 @@ impl SettingsView {
             "transcription.model" => c.transcription.model = value.trim().to_string(),
             "transcription.baseUrl" => c.transcription.base_url = value.trim().to_string(),
             "transcription.language" => c.transcription.language = value.trim().to_string(),
+            "transcription.pauseSeconds" => {
+                let pause = num(&value, 0.0, 10.0, c.transcription.pause_seconds as f64);
+                // Tenths are plenty; keeps "1.5" from becoming "1.5000000001".
+                c.transcription.pause_seconds = ((pause * 10.0).round() / 10.0) as f32;
+                normalized = Some(c.transcription.pause_seconds.to_string());
+            }
             "transcription.chunkSeconds" => {
                 c.transcription.chunk_seconds = num(&value, 0.0, 120.0, c.transcription.chunk_seconds as f64) as u32;
                 normalized = Some(c.transcription.chunk_seconds.to_string());
@@ -1045,6 +1050,14 @@ impl SettingsView {
         }
 
         out.push(section("Recording", false).into_any_element());
+        let pause = self.input(
+            "transcription.pauseSeconds",
+            &voice.pause_seconds.to_string(),
+            "0",
+            FieldKind::Number,
+            window,
+            cx,
+        );
         let chunk = self.input(
             "transcription.chunkSeconds",
             &voice.chunk_seconds.to_string(),
@@ -1053,16 +1066,16 @@ impl SettingsView {
             window,
             cx,
         );
+        out.push(row(vec![
+            field("Pause to transcribe (s)", input_box(pause), None).into_any_element(),
+            field("Longest chunk (s)", input_box(chunk), None).into_any_element(),
+        ]));
         out.push(
-            field(
-                "Chunk length",
-                input_box(chunk),
-                Some(hint(if is_local {
-                    "Seconds per pass while recording. **0** transcribes once when you stop — most accurate. **15–30** gives a rolling transcript during a long call and keeps the model warm."
-                } else {
-                    "Seconds per upload while recording. **0** transcribes once when you stop — most accurate. **15–30** gives a rolling transcript during a long call. Values under 5 are ignored."
-                }).into_any_element()),
+            hint(
+                "When the speaker pauses this long, what they said is transcribed straight away while recording goes on — **1–2** suits conversation. A chunk is also cut at the longest length (**0** means one minute when pauses are on). With both at **0**, it transcribes once when you stop. Silence is never sent.",
             )
+            .mt(px(-10.))
+            .mb(px(15.))
             .into_any_element(),
         );
 

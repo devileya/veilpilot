@@ -244,10 +244,16 @@ OpenAI, Groq (`whisper-large-v3-turbo` is cheap and fast), or your own server. N
 Anthropic has no speech-to-text endpoint, so "chat on Claude, transcribe locally" (or on
 Groq) is a normal setup, not a misconfiguration.
 
-**Chunk length** decides the trade: `0` transcribes once when you stop recording and is
-the most accurate; `15`–`30` gives a rolling transcript during a long call and keeps the
-local model warm. Chunks are cut from one continuous buffer, so no audio is lost at the
-seams.
+**Pause to transcribe** (default 1.5 s): when the speaker goes quiet that long, what they
+said is transcribed right away while recording carries on, so the transcript fills in
+sentence by sentence during the call. A short breath mid-sentence does not cut it. Silence
+is never sent to the transcriber; Whisper tends to invent words for it.
+
+**Longest chunk** caps a segment for someone who never pauses (0 means one minute when
+pause cuts are on). With both at `0`, it transcribes once when you stop, which gives
+Whisper the most context but shows nothing until then and, for cloud transcription, is
+limited to the 25 MB upload (about 13 minutes). Segments are cut from one continuous
+buffer and transcribed in order, so no audio is lost at the seams.
 
 ### System audio (hearing the other side)
 

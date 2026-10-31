@@ -250,8 +250,12 @@ pub struct TranscriptionConfig {
     pub model: String,
     /// '' -> autodetect.
     pub language: String,
-    /// 0 -> transcribe once on stop; >= 5 -> rolling chunks.
+    /// Longest segment while recording; >= 5 -> cut at least this often.
+    /// 0 -> no fixed length.
     pub chunk_seconds: u32,
+    /// Silence after speech that sends what was said straight to
+    /// transcription; 0 -> no pause cuts.
+    pub pause_seconds: f32,
     /// Input device name; '' -> system default.
     pub input_device_id: String,
     pub capture_system_audio: bool,
@@ -266,6 +270,7 @@ impl Default for TranscriptionConfig {
             model: String::new(),
             language: String::new(),
             chunk_seconds: 0,
+            pause_seconds: 1.5,
             input_device_id: String::new(),
             capture_system_audio: false,
             whisper_cpp: WhisperCppConfig::default(),
@@ -826,6 +831,7 @@ mod tests {
         assert_eq!(cfg.window.bounds.unwrap().width, 431.0);
         assert_eq!(cfg.prompts.len(), 1, "arrays replace defaults wholesale");
         assert_eq!(cfg.transcription.provider, "local");
+        assert_eq!(cfg.transcription.pause_seconds, 1.5, "existing installs get pause cuts");
         // Saving and re-reading keeps the same shape.
         let again = serde_json::to_string(&cfg).unwrap();
         assert!(again.contains("\"claudeCode\""));

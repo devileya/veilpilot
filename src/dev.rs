@@ -353,6 +353,22 @@ pub fn handle(command: Command, panel: &mut Panel, window: &mut Window, cx: &mut
             panel.append_transcript(&rest, cx);
             reply!(ok());
         }
+        "feed" => {
+            // Record from a WAV file as if it were the microphone, in real
+            // time (or `speed` times faster). Stop with the record action.
+            let mut words = rest.split_whitespace();
+            let path = words.next().unwrap_or_default().to_string();
+            let speed: f64 = words.next().and_then(|w| w.parse().ok()).unwrap_or(1.0);
+            let decoded = std::fs::read(&path).ok().and_then(|b| crate::audio::decode_wav(&b));
+            match decoded {
+                Some((samples, rate, _)) => {
+                    let seconds = samples.len() as f64 / rate as f64;
+                    panel.begin_recording(crate::audio::Recorder::simulated(samples, rate, speed), cx);
+                    reply!(format!("ok {seconds:.1}s"));
+                }
+                None => reply!(format!("error: {path} is not a 16-bit PCM WAV")),
+            }
+        }
         "transcribe" => {
             let job = match crate::transcribe::job(&panel.cfg, &panel.secrets) {
                 Ok(job) => job,

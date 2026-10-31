@@ -1,8 +1,8 @@
 //! Microphone (and, on Windows, system-audio loopback) capture.
 //!
 //! Samples are downmixed to mono in the audio callback and buffered. A segment
-//! is taken by swapping the buffer out, so rolling chunks never drop audio at
-//! the seams. Each segment is resampled to 16 kHz mono 16-bit WAV, which
+//! is cut when the speaker pauses or a length limit is reached, by swapping
+//! the buffer out, so no audio is lost at the seams. Each segment is resampled to 16 kHz mono 16-bit WAV, which
 //! whisper.cpp reads natively and every OpenAI-compatible endpoint accepts —
 //! no ffmpeg needed.
 
@@ -16,15 +16,134 @@ pub const TARGET_RATE: u32 = 16_000;
 /// Whisper gives nonsense on fragments; a tap on the hotkey is not speech.
 const MIN_SECONDS: f64 = 0.4;
 
-#[derive(Default)]
+/// Voice activity, judged frame by frame (30 ms) against an adaptive noise
+/// floor. Deliberately simple: it only has to tell "someone is talking" from
+/// "room tone", and err towards talking so quiet speech is never dropped.
+struct Vad {
+    frame: usize,
+    floor: f32,
+    /// Consecutive loud frames; a blip shorter than three is not speech.
+    run: usize,
+    /// Speech frames in the current segment.
+    speech_frames: usize,
+    /// Sample index just past the last speech frame in the current segment.
+    last_speech_end: Option<usize>,
+}
+
+/// Speech has to rise this far above the room's noise floor...
+const SPEECH_OVER_FLOOR: f32 = 3.0;
+/// ...and above this absolute level (about -50 dBFS).
+const SPEECH_MIN_RMS: f32 = 0.003;
+const MIN_SPEECH_RUN: usize = 3;
+
+impl Vad {
+    fn new(rate: u32) -> Self {
+        Self {
+            frame: (rate as usize * 30 / 1000).max(1),
+            floor: 0.002,
+            run: 0,
+            speech_frames: 0,
+            last_speech_end: None,
+        }
+    }
+
+    fn frame(&mut self, samples: &[f32], end: usize) {
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        let loud = rms > (self.floor * SPEECH_OVER_FLOOR).max(SPEECH_MIN_RMS);
+        if rms < self.floor {
+            self.floor = rms.max(1e-5);
+        } else if !loud {
+            self.floor = self.floor * 0.95 + rms * 0.05;
+        } else {
+            // A noise source that switches on (a fan) is learned within
+            // tens of seconds instead of counting as speech forever.
+            self.floor *= 1.001;
+        }
+        self.run = if loud { self.run + 1 } else { 0 };
+        if self.run >= MIN_SPEECH_RUN {
+            self.speech_frames += 1;
+            self.last_speech_end = Some(end);
+        }
+    }
+
+    fn reset_segment(&mut self) {
+        self.run = 0;
+        self.speech_frames = 0;
+        self.last_speech_end = None;
+    }
+}
+
 struct Capture {
     samples: Vec<f32>,
     rate: u32,
     error: Option<String>,
+    /// How far into `samples` the VAD has looked.
+    analysed: usize,
+    vad: Vad,
+}
+
+impl Capture {
+    fn new(rate: u32) -> Self {
+        Self { samples: Vec::new(), rate, error: None, analysed: 0, vad: Vad::new(rate) }
+    }
+
+    fn analyse(&mut self) {
+        let frame = self.vad.frame;
+        while self.analysed + frame <= self.samples.len() {
+            let end = self.analysed + frame;
+            let (vad, samples) = (&mut self.vad, &self.samples);
+            vad.frame(&samples[self.analysed..end], end);
+            self.analysed = end;
+        }
+    }
+
+    fn seconds(&self) -> f64 {
+        self.samples.len() as f64 / self.rate.max(1) as f64
+    }
+
+    /// Seconds since the last speech in this segment; `None` if there was none.
+    fn trailing_silence(&self) -> Option<f64> {
+        self.vad.last_speech_end.map(|end| (self.analysed - end) as f64 / self.rate.max(1) as f64)
+    }
+
+    fn take(&mut self) -> (Vec<f32>, u32) {
+        self.analysed = 0;
+        self.vad.reset_segment();
+        (std::mem::take(&mut self.samples), self.rate)
+    }
+
+    /// Drop silence older than `keep` seconds, so a long quiet stretch never
+    /// piles up in memory or reaches the transcriber.
+    fn trim_silence(&mut self, keep: f64) {
+        let keep = (keep * self.rate as f64) as usize;
+        if self.vad.speech_frames > 0 || self.analysed <= keep {
+            return;
+        }
+        let drop = self.analysed - keep;
+        self.samples.drain(..drop);
+        self.analysed -= drop;
+    }
+}
+
+/// When a segment is cut and sent to transcription while recording.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SegmentPolicy {
+    /// Cut after this much silence following speech; 0 turns pause cuts off.
+    pub pause_seconds: f64,
+    /// Cut when a segment gets this long regardless; 0 means no limit.
+    pub max_seconds: f64,
+}
+
+/// A stretch of recording, one mono buffer per source.
+pub struct Segment {
+    pub parts: Vec<(Vec<f32>, u32)>,
+    /// Whether anyone spoke in it. Silent segments are not transcribed:
+    /// Whisper invents text for silence.
+    pub speech: bool,
 }
 
 struct Source {
-    _stream: cpal::Stream,
+    _stream: Option<cpal::Stream>,
     capture: Arc<Mutex<Capture>>,
 }
 
@@ -41,7 +160,7 @@ fn open(device: &cpal::Device) -> anyhow::Result<Source> {
     let config = device.default_input_config().context("reading the input format")?;
     let channels = config.channels().max(1) as usize;
     let rate = config.sample_rate().0;
-    let capture = Arc::new(Mutex::new(Capture { samples: Vec::new(), rate, error: None }));
+    let capture = Arc::new(Mutex::new(Capture::new(rate)));
     let stream_config: cpal::StreamConfig = config.clone().into();
 
     macro_rules! build {
@@ -79,7 +198,7 @@ fn open(device: &cpal::Device) -> anyhow::Result<Source> {
     }
     .context("opening the input stream")?;
     stream.play().context("starting the input stream")?;
-    Ok(Source { _stream: stream, capture })
+    Ok(Source { _stream: Some(stream), capture })
 }
 
 impl Recorder {
@@ -123,21 +242,80 @@ impl Recorder {
         Ok((Recorder { sources }, warning))
     }
 
+    /// A recorder fed from samples instead of a device, delivered in real
+    /// time (times `speed`) — the dev control channel's stand-in microphone.
+    pub fn simulated(samples: Vec<f32>, rate: u32, speed: f64) -> Recorder {
+        let capture = Arc::new(Mutex::new(Capture::new(rate)));
+        let sink = capture.clone();
+        std::thread::spawn(move || {
+            let block = (rate as usize / 50).max(1); // 20 ms
+            let interval = 0.02 / speed.max(0.01);
+            let start = std::time::Instant::now();
+            // Like a live microphone, it keeps delivering (silence) after the
+            // file ends, until the recorder is dropped.
+            let silence = vec![0.0f32; block];
+            let mut chunks = samples.chunks(block);
+            for n in 1u32.. {
+                // Scheduled against the start time, so sleeps never drift.
+                let due = start + std::time::Duration::from_secs_f64(interval * n as f64);
+                if let Some(wait) = due.checked_duration_since(std::time::Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+                if Arc::strong_count(&sink) == 1 {
+                    return;
+                }
+                let chunk = chunks.next().unwrap_or(&silence);
+                match sink.lock() {
+                    Ok(mut c) => c.samples.extend_from_slice(chunk),
+                    Err(_) => return,
+                }
+            }
+        });
+        Recorder { sources: vec![Source { _stream: None, capture }] }
+    }
+
     /// A stream error reported by the audio callback, if any.
     pub fn error(&self) -> Option<String> {
         self.sources.iter().find_map(|s| s.capture.lock().ok().and_then(|c| c.error.clone()))
     }
 
-    /// Take everything recorded so far as raw mono buffers (one per source).
-    /// Cheap enough for the UI thread; the heavy work is [`encode_segment`].
-    pub fn take(&self) -> Vec<(Vec<f32>, u32)> {
-        self.sources
-            .iter()
-            .map(|s| {
-                let mut c = s.capture.lock().unwrap();
-                (std::mem::take(&mut c.samples), c.rate)
-            })
-            .collect()
+    /// Look at what arrived since the last call and cut a segment if the
+    /// policy says so. Cheap enough to call from the UI thread a few times a
+    /// second; the heavy work is [`encode_segment`].
+    pub fn poll(&self, policy: SegmentPolicy) -> Option<Segment> {
+        let mut captures: Vec<_> = self.sources.iter().map(|s| s.capture.lock().unwrap()).collect();
+        for c in captures.iter_mut() {
+            c.analyse();
+        }
+        let speech = captures.iter().any(|c| c.vad.speech_frames > 0);
+        let longest = captures.iter().map(|c| c.seconds()).fold(0.0, f64::max);
+
+        // A pause means every source has gone quiet: on Windows the other
+        // side of the call may still be talking while you are not.
+        let paused = policy.pause_seconds > 0.0
+            && speech
+            && captures.iter().all(|c| c.trailing_silence().is_none_or(|s| s >= policy.pause_seconds));
+        let too_long = policy.max_seconds > 0.0 && longest >= policy.max_seconds;
+
+        if paused || too_long {
+            return Some(Segment { parts: captures.iter_mut().map(|c| c.take()).collect(), speech });
+        }
+        if !speech && policy.pause_seconds > 0.0 {
+            for c in captures.iter_mut() {
+                c.trim_silence(1.0);
+            }
+        }
+        None
+    }
+
+    /// Everything left, for when recording stops.
+    pub fn finish(&self) -> Segment {
+        let mut captures: Vec<_> = self.sources.iter().map(|s| s.capture.lock().unwrap()).collect();
+        for c in captures.iter_mut() {
+            c.analyse();
+        }
+        let speech = captures.iter().any(|c| c.vad.speech_frames > 0);
+        Segment { parts: captures.iter_mut().map(|c| c.take()).collect(), speech }
     }
 }
 
@@ -321,5 +499,111 @@ mod tests {
         assert_eq!(back.len(), 16_000);
         assert!((back[100] - 0.5).abs() < 1e-3);
         assert!((back[12_000] - 0.25).abs() < 1e-3);
+    }
+
+    /* ---------- segmentation ---------- */
+
+    const RATE: u32 = 16_000;
+
+    fn manual() -> (Recorder, Arc<Mutex<Capture>>) {
+        let capture = Arc::new(Mutex::new(Capture::new(RATE)));
+        (Recorder { sources: vec![Source { _stream: None, capture: capture.clone() }] }, capture)
+    }
+
+    /// Room tone: deterministic low-level noise.
+    fn room(seconds: f64) -> Vec<f32> {
+        let mut x: u32 = 12345;
+        (0..(RATE as f64 * seconds) as usize)
+            .map(|_| {
+                x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                ((x >> 16) as f32 / 65536.0 - 0.5) * 0.002
+            })
+            .collect()
+    }
+
+    /// Voiced speech stand-in: a 180 Hz tone with a syllable-rate envelope.
+    fn voice(seconds: f64) -> Vec<f32> {
+        (0..(RATE as f64 * seconds) as usize)
+            .map(|i| {
+                let t = i as f64 / RATE as f64;
+                ((2.0 * PI * 180.0 * t).sin() * (0.6 + 0.4 * (2.0 * PI * 4.0 * t).sin()) * 0.08) as f32
+            })
+            .collect()
+    }
+
+    /// Feed `audio` in 100 ms steps, polling after each; returns the cuts
+    /// with the time (s) each happened.
+    fn run(audio: &[f32], policy: SegmentPolicy) -> (Vec<(f64, Segment)>, Recorder) {
+        let (rec, cap) = manual();
+        let step = RATE as usize / 10;
+        let mut cuts = Vec::new();
+        for (n, chunk) in audio.chunks(step).enumerate() {
+            cap.lock().unwrap().samples.extend_from_slice(chunk);
+            if let Some(seg) = rec.poll(policy) {
+                cuts.push(((n + 1) as f64 / 10.0, seg));
+            }
+        }
+        (cuts, rec)
+    }
+
+    fn secs(seg: &Segment) -> f64 {
+        seg.parts[0].0.len() as f64 / RATE as f64
+    }
+
+    const PAUSES: SegmentPolicy = SegmentPolicy { pause_seconds: 1.5, max_seconds: 60.0 };
+
+    #[test]
+    fn a_pause_cuts_the_segment_right_away() {
+        let audio = [room(0.5), voice(3.0), room(2.0), voice(2.0), room(0.3)].concat();
+        let (cuts, rec) = run(&audio, PAUSES);
+        assert_eq!(cuts.len(), 1, "one pause, one cut");
+        let (at, seg) = &cuts[0];
+        assert!(seg.speech);
+        // Speech ended at 3.5 s; the cut lands about 1.5 s later.
+        assert!((4.9..=5.3).contains(at), "cut at {at}");
+        assert!((4.9..=5.3).contains(&secs(seg)));
+        let rest = rec.finish();
+        assert!(rest.speech, "the second sentence is still there on stop");
+    }
+
+    #[test]
+    fn a_short_breath_does_not_cut() {
+        let audio = [voice(2.0), room(0.8), voice(2.0), room(0.5)].concat();
+        let (cuts, rec) = run(&audio, PAUSES);
+        assert!(cuts.is_empty());
+        assert!((5.0..=5.4).contains(&(rec.finish().parts[0].0.len() as f64 / RATE as f64)));
+    }
+
+    #[test]
+    fn continuous_talk_is_cut_at_the_length_limit() {
+        let audio = voice(25.0);
+        let (cuts, _) = run(&audio, SegmentPolicy { pause_seconds: 1.5, max_seconds: 10.0 });
+        assert_eq!(cuts.len(), 2);
+        assert!(cuts.iter().all(|(_, s)| s.speech && (secs(s) - 10.0).abs() < 0.15));
+    }
+
+    #[test]
+    fn silence_is_trimmed_and_never_transcribed() {
+        let (cuts, rec) = run(&room(30.0), PAUSES);
+        assert!(cuts.is_empty());
+        let rest = rec.finish();
+        assert!(!rest.speech);
+        assert!(secs(&rest) <= 1.2, "silence does not pile up: {}", secs(&rest));
+    }
+
+    #[test]
+    fn a_click_is_not_speech() {
+        let audio = [room(1.0), voice(0.05), room(3.0)].concat();
+        let (cuts, rec) = run(&audio, PAUSES);
+        assert!(cuts.is_empty());
+        assert!(!rec.finish().speech);
+    }
+
+    #[test]
+    fn time_only_chunks_still_work() {
+        let audio = [voice(4.0), room(4.0), voice(4.0)].concat();
+        let (cuts, _) = run(&audio, SegmentPolicy { pause_seconds: 0.0, max_seconds: 5.0 });
+        assert_eq!(cuts.len(), 2);
+        assert!(cuts[0].1.speech && (secs(&cuts[0].1) - 5.0).abs() < 0.15);
     }
 }
