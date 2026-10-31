@@ -1,0 +1,68 @@
+[package]
+name = "veilpilot"
+version = "0.2.0"
+edition = "2024"
+description = "Heads-up AI copilot that stays out of your screen share. Screenshot, transcribe, ask — on hotkeys."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "veilpilot"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "0.2.2"
+
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "6"
+futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+unicode-segmentation = "1"
+uuid = { version = "1", features = ["v4"] }
+
+# Network and child processes run on a small Tokio runtime beside GPUI's
+# executor; results come back over channels.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart", "http2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "macros", "time", "sync", "fs"] }
+tokio-util = "0.7"
+
+# Native integrations
+cpal = "0.15"
+global-hotkey = "0.7"
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+tray-icon = "0.21"
+xcap = "0.7"
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_HiDpi",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+
+# Generic image and audio code is instantiated in this crate, so it needs some
+# optimisation even in dev builds to keep screenshots and resampling snappy.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

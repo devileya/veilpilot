@@ -6,6 +6,9 @@ Take a screenshot, transcribe what is being said, ask a model about either — a
 global hotkeys. The answer streams into a translucent panel that the capture pipeline
 never sees.
 
+A native Rust app built on [GPUI](https://gpui.rs), the GPU-accelerated UI framework
+behind the Zed editor. No Electron, no web view: the macOS app is a single 16 MB binary.
+
 ```
 ┌──────────────────────────────────────────┐
 │ ◪ VeilPilot        ● invisible  ○ idle  settings
@@ -69,24 +72,27 @@ reads `visible` when it is off.
 
 ## Install and run
 
-Requires Node 18+ (built on Node 24).
+Requires a Rust toolchain ([rustup](https://rustup.rs), Rust 1.89+). On macOS, Xcode (or
+its command-line tools) for the Metal shader compiler; on Windows, Visual Studio's C++
+build tools.
 
 ```bash
 cd veilpilot
-npm install        # also generates the icons
-npm start
+cargo run --release
 ```
 
-Package installers:
+Package it:
 
 ```bash
-npm run dist:mac   # .dmg (arm64 + x64)
-npm run dist:win   # NSIS .exe
+scripts/bundle-macos.sh          # target/release/bundle/VeilPilot.app
+scripts/bundle-macos.sh --dmg    # ...plus a .dmg
+cargo build --release            # Windows: target\release\veilpilot.exe
 ```
 
-Unsigned builds will warn on first launch. For real distribution, sign and notarize:
-set `CSC_LINK` / `CSC_KEY_PASSWORD` and `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` /
-`APPLE_TEAM_ID` before `npm run dist:mac`.
+The bundle is signed ad-hoc unless `CODESIGN_IDENTITY` names a Developer ID certificate.
+An ad-hoc signature changes with every build, so macOS asks for Screen Recording and
+Microphone again after a rebuild; a real identity keeps the grants. Notarize with
+`xcrun notarytool` for distribution.
 
 ### Permissions
 
@@ -139,14 +145,15 @@ Three request shapes cover everything, so adding a provider is configuration, no
 
 - **OpenAI-compatible** (`POST /chat/completions`) — OpenAI, GLM/Zhipu, Groq, OpenRouter,
   DeepSeek, Ollama, LM Studio, vLLM, or any custom base URL
-- **Anthropic** — the official `@anthropic-ai/sdk`, with adaptive thinking, an effort
-  setting, and server-side fallback on a declined request
+- **Anthropic** — the Messages API over HTTPS + SSE (there is no official Rust SDK), with
+  adaptive thinking, an effort setting, and server-side fallback on a declined request
 - **Claude Code** — the `claude` CLI you already have, in headless mode. See below.
 
 Presets ship with a base URL and a starting model; both are editable, because model IDs
-change faster than this README. Add your key in Settings › Keys. Keys are encrypted with
-the OS keystore (Keychain / DPAPI) and stored separately from `config.json` —
-`safeStorage`, never plaintext in the config.
+change faster than this README. Add your key in Settings › Keys. Keys live in the OS
+keystore (macOS Keychain / Windows Credential Manager), never in `config.json`. Only if no
+keystore is available are they written to `secrets.bin` beside the config, and the app
+says so in its log.
 
 Set the **effort** on a per-prompt basis: `Selesaikan` and `Review kode` ship at `high`
 because they are real problems; the rest run at the global default (`medium`) so a
@@ -225,9 +232,10 @@ testing — so setting the language in Settings › Voice is about speed, not co
 skips the detection pass. VeilPilot reads the model file through once at startup to take
 the cold first pass out of your first chunk.
 
-whisper.cpp only accepts 16 kHz mono PCM, so VeilPilot decodes and resamples the
-recording with the Web Audio API before handing it over. That keeps ffmpeg off the
-dependency list — one less thing to install, especially on Windows.
+whisper.cpp only accepts 16 kHz mono PCM, so VeilPilot records raw samples
+(CoreAudio / WASAPI) and resamples them itself with a windowed-sinc filter before handing
+them over. That keeps ffmpeg off the dependency list — one less thing to install,
+especially on Windows.
 
 ### Cloud transcription, if you want it
 
@@ -238,14 +246,14 @@ Groq) is a normal setup, not a misconfiguration.
 
 **Chunk length** decides the trade: `0` transcribes once when you stop recording and is
 the most accurate; `15`–`30` gives a rolling transcript during a long call and keeps the
-local model warm. Each chunk is a standalone recording, not a slice, because slices of one
-recording are not independently decodable.
+local model warm. Chunks are cut from one continuous buffer, so no audio is lost at the
+seams.
 
 ### System audio (hearing the other side)
 
-- **Windows** — desktop loopback is mixed in when you tick *System audio*. If it fails,
-  the app falls back to the microphone and tells you.
-- **macOS** — Chromium gets no system-audio tap. Install a loopback driver
+- **Windows** — desktop loopback (WASAPI) is mixed in when you tick *System audio*. If it
+  fails, the app falls back to the microphone and tells you.
+- **macOS** — apps get no system-audio tap. Install a loopback driver
   ([BlackHole](https://existential.audio/blackhole/) is free), route your meeting output
   through it, and pick it as the microphone in Settings › Voice.
 
@@ -267,27 +275,60 @@ Add as many as you have free key combinations.
 ## Project layout
 
 ```
-src/main/        Electron main process
-  index.js         lifecycle, tray, the actions hotkeys fire
-  overlay.js       the window: content protection, always-on-top, geometry
-  capture.js       desktopCapturer + the region picker
-  session.js       conversation, screenshots, transcript
-  hotkeys.js       global shortcut registration and failure reporting
-  transcribe.js    routes audio to the local engine or a cloud endpoint
-  whisper-cpp.js   on-device speech to text: detect, model download, run
-  store.js         config.json + OS-keystore secrets
-  ipc.js           every renderer-facing handler
-  ai/              provider adapters + dispatch
-    openai.js        OpenAI-compatible /chat/completions
-    anthropic.js     official @anthropic-ai/sdk
-    claude-code.js   the local `claude` CLI, headless stream-json
-src/renderer/    the panel: app.js, settings.js, recorder.js, markdown.js
-src/region/      the drag-to-select overlay
-build/           make-icons.js writes the tray and app icons at install time
+src/
+  main.rs            startup: single instance, the panel window, hotkeys/tray/control wiring
+  config.rs          config.json: defaults, provider presets, merge, migrations
+  secrets.rs         API keys in the OS keystore
+  session.rs         conversation, screenshots, transcript
+  hotkeys.rs         Electron-style accelerators -> global shortcuts, failure reporting
+  tray.rs            menu-bar / notification-area icon and menu
+  capture.rs         screenshots: pick a display, grab, crop, downscale, encode
+  audio.rs           microphone (+ WASAPI loopback) capture, resampling, WAV
+  transcribe.rs      routes audio to the local engine or a cloud endpoint
+  whisper.rs         on-device speech to text: detect, model download, run
+  ai/                provider adapters + streaming with cancellation
+    openai.rs          OpenAI-compatible /chat/completions
+    anthropic.rs       Anthropic Messages API (SSE)
+    claude_code.rs     the local `claude` CLI, headless stream-json
+  platform/          native window and OS calls GPUI does not expose
+    macos.rs           NSWindow sharing type, level, click-through, permissions
+    windows.rs         SetWindowDisplayAffinity, tool window, DPI-aware geometry
+  ui/                GPUI views
+    panel.rs           the panel: rail, answers, transcript, ask box, and every action
+    settings.rs        Settings › AI / Voice / Capture / Prompts / Keys
+    region.rs          the drag-to-select overlay
+    text_input.rs      text field (GPUI ships none): selection, IME, clipboard, wrapping
+    markdown.rs        the answer renderer
+  dev.rs             the dev control channel the end-to-end tests drive
+scripts/bundle-macos.sh   builds VeilPilot.app / .dmg
+tests/e2e.py              end-to-end tests against tests/mock_llm.py
 ```
 
-Config and keys live in Electron's `userData` directory — Settings › Capture prints the
-exact path.
+Config, models and logs live in `~/Library/Application Support/VeilPilot` on macOS and
+`%APPDATA%\VeilPilot` on Windows — the same place the Electron build used, so an existing
+install keeps its settings and downloaded models. Settings › Capture prints the exact path.
+
+Answers are drawn by GPUI rather than a browser, so they are not text-selectable; every
+answer has a **copy** button that puts its plain text on the clipboard.
+
+---
+
+## Testing
+
+```bash
+cargo test                       # unit tests: config, SSE, adapters, markdown, audio, ...
+cargo build && python3 tests/e2e.py              # the real app, end to end
+python3 tests/e2e.py --release --claude-code     # also three tiny real Claude Code asks
+```
+
+`tests/e2e.py` launches the app in a throwaway data directory with `VEILPILOT_DEV=1`,
+which opens a local control channel. The script drives the app the way a user would —
+hotkey actions (delivered through the real Carbon hotkey handler), keystrokes, clicks —
+against `tests/mock_llm.py`, and checks both the app's state and what it sent over the
+wire: streaming, cancel, history, screenshots and region crops, transcript prompts,
+Anthropic fallback and refusal handling, window toggles, settings edits, hotkey capture,
+API-key storage, and speech to text through whisper.cpp. Without `VEILPILOT_DEV=1` the
+channel only accepts `show`, which is how a second launch brings the running panel back.
 
 ---
 
