@@ -237,6 +237,8 @@ mod tests {
             show_thinking: true,
             server_side_fallback: true,
             claude_code: None,
+            cli: None,
+            cwd: None,
         };
         let b = request_body(&opts, true);
         assert_eq!(b["fallbacks"], "default");

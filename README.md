@@ -11,9 +11,12 @@ behind the Zed editor. No Electron, no web view: the macOS app is a single 16 MB
 
 ```
 ┌──────────────────────────────────────────┐
-│ ◪ VeilPilot        ● invisible  ○ idle  settings
+│ ◪ VeilPilot      ◆ Shop ▾  ✦ Claude Code ▾ ⚙│  ← context (DevCat project) and agent
+│ ● invisible  ○ rec  ⚡ auto  @ Arif  ◒ notch│  ← modes, one click each
+├──────────────────────────────────────────┤
+│ CHAT   LIVE 2   TRANSCRIPT +3             │
 ├──────────────────────────────────────────┤  ← the seam glows while streaming
-│ ⌘⇧2  Selesaikan      claude-opus-5 · 11:04│
+│ ⌘⇧2  SELESAIKAN      claude-opus-5 · 11:04│
 │ ┌────────┐                                │
 │ │ shot   │ 1600×1000 px                   │
 │ └────────┘                                │
@@ -21,12 +24,18 @@ behind the Zed editor. No Electron, no web view: the macOS app is a single 16 MB
 │ `parseConfig` — line 42 reads             │
 │ `cfg.db.host` before the await resolves…  │
 ├──────────────────────────────────────────┤
-│ transcript                       12 lines │
-│ 11:04:12  so what we need here is…        │
+│ ⌘⇧1 Jelaskan  ⌘⇧2 Selesaikan  ⌘⇧3 Review  ?│  ← the hotkeys stay on screen
+│ ⌘⇧R Rec  ⌘⇧A Region  ⌘⇧Y Summary  ⌘⇧\ Hide │
 ├──────────────────────────────────────────┤
 │ › ask anything                          ↵ │
 └──────────────────────────────────────────┘
 ```
+
+Three tabs: **Chat** (your asks), **Live** (answers VeilPilot gave by itself while
+listening), and **Transcript** (with Summarize and Save to memory). The strip of hotkeys
+under them never goes away, and `?` opens every key at once. In **notch mode** the panel
+gives way to a black island around the MacBook notch that drops answers down and folds
+back up.
 
 ---
 
@@ -122,7 +131,11 @@ and prompt hotkeys are editable in Settings › Prompts.
 | `⌘⇧A` | Drag-select a region, then ask |
 | `⌘⇧S` | Attach a screenshot without asking — type your own question |
 | `⌘⇧R` | Start / stop transcribing |
-| `⌘⇧\` | Show / hide the panel |
+| `⌘⇧Y` | Summarize the transcript |
+| `⌘⇧U` | Save the summary and transcript to the picked project's memory |
+| `⌘⇧L` | Auto-answer on / off (answer questions heard in the transcript) |
+| `⌘⇧N` | Notch mode on / off |
+| `⌘⇧\` | Show / hide the panel (the island, in notch mode) |
 | `⌘⇧↩` | Focus the ask box |
 | `⌘⇧.` | Stop generating |
 | `⌘⇧K` | New session (clears conversation and transcript) |
@@ -130,6 +143,7 @@ and prompt hotkeys are editable in Settings › Prompts.
 | `⌘⇧P` | Toggle capture protection |
 | `⌘⇧=` / `⌘⇧-` | Opacity up / down |
 | `⌥⇧` + arrows | Move the panel |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab (panel focused) |
 
 A hotkey another app already owns cannot be registered. VeilPilot tells you which ones
 failed on launch instead of leaving a dead key.
@@ -148,6 +162,14 @@ Three request shapes cover everything, so adding a provider is configuration, no
 - **Anthropic** — the Messages API over HTTPS + SSE (there is no official Rust SDK), with
   adaptive thinking, an effort setting, and server-side fallback on a declined request
 - **Claude Code** — the `claude` CLI you already have, in headless mode. See below.
+- **Other agents on this Mac** — Codex, Gemini CLI, opencode, GitHub Copilot CLI, Aider,
+  or any command you name. See [Other agents](#other-agents).
+- **DevCat Agent connections** — the model connections you set up in DevCat, with the key
+  DevCat keeps.
+
+Pick one from the **✦ agent menu** at the top of the panel; anything that cannot answer
+yet says why (no key, not installed). Each provider keeps its own model and base URL, so
+switching back and forth loses nothing.
 
 Presets ship with a base URL and a starting model; both are editable, because model IDs
 change faster than this README. Add your key in Settings › Keys. Keys live in the OS
@@ -203,6 +225,69 @@ Claude Code's own session store under `~/.claude` like any other session — inc
 whatever was on screen. And a GUI app does not inherit your shell `PATH`, so VeilPilot
 probes the usual install locations (`~/.local/bin`, `~/.claude/bin`, `~/.claude/local`,
 Homebrew, npm global); if yours lives somewhere else, name it in Settings › AI.
+
+### Other agents
+
+Every agent runs headless, one question per run, with the login it already has — VeilPilot
+stores no credential for any of them. With a project picked, the agent runs in the
+project's code folder; with no context, in an empty temp folder.
+
+| Agent | How it is run |
+|---|---|
+| Codex | `codex exec --json --sandbox read-only --skip-git-repo-check [--image shot.png] -` (prompt on stdin) |
+| Gemini CLI | `gemini --prompt "… @shot.png"` |
+| opencode | `opencode run --format json [--file shot.png] -- "…"` (reports cost) |
+| Copilot CLI | `copilot --prompt "…"` |
+| Aider | `aider --message "…" --no-git --yes-always --no-auto-commits …` |
+| Custom | your command; `{prompt}` is replaced by the prompt, else it is sent on stdin |
+
+Screenshots are handed over as temporary PNG files (deleted after the run) to the agents
+that can see images. As with Claude Code, a GUI app does not inherit your shell `PATH`:
+VeilPilot asks your login shell and the usual install folders, and Settings › AI takes an
+explicit path when that is not enough. A failed run shows the agent's own error line.
+
+## Project context and memory (DevCat)
+
+VeilPilot reads DevCat's projects and its shared agent memory. The
+**◇ context menu** at the top of the panel picks one:
+
+- **No context** (the default) — the agent knows only this chat, and nothing is saved.
+- **A DevCat project** — its memories (newest first, within a budget) are added to the
+  system prompt, agents run in the project's folder, and **Save to memory** is allowed.
+  Settings › AI can keep the project but leave its memory out.
+
+**Summarize** (`⌘⇧Y`, or the button on the Transcript tab) asks the agent for a summary of
+the whole transcript with the prompt in Settings › Voice. **Save to memory** (`⌘⇧U`)
+stores that summary plus the transcript as one memory entry in the picked project —
+summarizing first if the transcript changed since. It goes through `devcat mcp`, DevCat's
+own MCP server, so secrets are scrubbed and the change shows up in DevCat's MCP activity
+log; if DevCat is not installed, the entry is written in the same format DevCat writes.
+Without a project nothing is saved.
+
+## Live answers
+
+While transcribing, VeilPilot can answer by itself — for a question you might be asked
+right now, before you have to ask for help:
+
+- **⚡ Auto-answer** (`⌘⇧L`) — when a transcript line reads as a question (Indonesian or
+  English: a question mark, a question word, or "menurut kamu…" style asks).
+- **@ Your name** — when someone says your name. Set it in Settings › Voice (comma
+  separated, nicknames welcome); speech to text misspells names, so one letter changed or
+  added still counts ("Arief" for "Arif"), but a shorter word does not ("Ari").
+
+The agent sees the last lines of the transcript (20 by default) and either writes what you
+can say, in at most three sentences, or replies `SKIP` when the line needs nothing from you
+— those are dropped silently. Answers appear on the **Live** tab, apart from your own asks;
+the panel switches to it unless you are halfway through typing.
+
+## Notch mode
+
+`⌘⇧N`, the ◒ chip, or Settings › Capture › Display. The panel is replaced by a black island
+that hugs the MacBook notch (on a display without one, and on Windows, a pill at the top
+of the screen). Its wings show recording, ⚡ / @ modes, unseen answers and protection. A new
+answer — live or asked — drops down from it and folds back 12 seconds after it finishes;
+hovering keeps it open, a click opens the full chat. `⌘⇧\` hides and shows the island.
+It is capture-protected like the panel.
 
 ### Speech to text runs on your machine by default
 
@@ -292,15 +377,23 @@ src/
   audio.rs           microphone (+ WASAPI loopback) capture, resampling, WAV
   transcribe.rs      routes audio to the local engine or a cloud endpoint
   whisper.rs         on-device speech to text: detect, model download, run
+  live.rs            live answers: question and name detection, the live prompt
+  devcat.rs          DevCat projects, memory (read, brief, save via `devcat mcp`), connections
   ai/                provider adapters + streaming with cancellation
     openai.rs          OpenAI-compatible /chat/completions
     anthropic.rs       Anthropic Messages API (SSE)
     claude_code.rs     the local `claude` CLI, headless stream-json
+    cli.rs             Codex, Gemini CLI, opencode, Copilot, Aider, custom commands
   platform/          native window and OS calls GPUI does not expose
     macos.rs           NSWindow sharing type, level, click-through, permissions
     windows.rs         SetWindowDisplayAffinity, tool window, DPI-aware geometry
   ui/                GPUI views
-    panel.rs           the panel: rail, answers, transcript, ask box, and every action
+    panel/             the panel and every action
+      mod.rs             state, asks, hotkey actions, transcript, summary
+      view.rs            header, menus, tabs, hotkey strip, cheatsheet, ask box
+      agents.rs          the agent and context menus, system prompt, agent options
+      live.rs            live answers, summarize, save to memory
+    island.rs          notch mode: the island window
     settings.rs        Settings › AI / Voice / Capture / Prompts / Keys
     region.rs          the drag-to-select overlay
     text_input.rs      text field (GPUI ships none): selection, IME, clipboard, wrapping
@@ -324,7 +417,7 @@ answer has a **copy** button that puts its plain text on the clipboard.
 ```bash
 cargo test                       # unit tests: config, SSE, adapters, markdown, audio, ...
 cargo build && python3 tests/e2e.py              # the real app, end to end
-python3 tests/e2e.py --release --claude-code     # also three tiny real Claude Code asks
+python3 tests/e2e.py --release --claude-code     # also a few tiny real Claude Code asks
 ```
 
 `tests/e2e.py` launches the app in a throwaway data directory with `VEILPILOT_DEV=1`,
@@ -333,7 +426,10 @@ hotkey actions (delivered through the real Carbon hotkey handler), keystrokes, c
 against `tests/mock_llm.py`, and checks both the app's state and what it sent over the
 wire: streaming, cancel, history, screenshots and region crops, transcript prompts,
 Anthropic fallback and refusal handling, window toggles, settings edits, hotkey capture,
-API-key storage, and speech to text through whisper.cpp. Without `VEILPILOT_DEV=1` the
+API-key storage, DevCat context and memory saves (through the real `devcat mcp` when
+installed, against a throwaway DevCat folder), agent CLIs (a custom command and a stand-in
+Codex), live answers and SKIP, summary, notch mode, and speech to text through
+whisper.cpp. Without `VEILPILOT_DEV=1` the
 channel only accepts `show`, which is how a second launch brings the running panel back.
 
 ---

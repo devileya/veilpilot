@@ -11,6 +11,8 @@ words in the last user message:
   nofallback  Anthropic: reject the fallbacks parameter with a 400
   boom      respond 500 with a JSON error body
   cut       end the stream without a terminal frame
+  rhetorical  OpenAI: a live-answer prompt whose last transcript line says it
+            gets exactly SKIP (the model declining to answer)
 """
 
 import json
@@ -24,6 +26,14 @@ ANSWER = (
     "```js\nconst cfg = await load()\n```\n"
     "See [docs](https://example.com/docs)."
 )
+
+
+def live_line(text):
+    """The newest transcript line of a live-answer prompt, or None."""
+    head, sep, _ = text.partition("\n\nThe last line")
+    if not sep:
+        return None
+    return head.splitlines()[-1]
 
 
 def last_user_text(body):
@@ -112,7 +122,8 @@ class Handler(BaseHTTPRequestHandler):
     def openai(self, body, text):
         self.sse_start()
         self.send_event(json.dumps({"choices": [{"delta": {"reasoning_content": "Thinking about it. "}}]}))
-        words = ANSWER.split(" ")
+        line = live_line(text)
+        words = ["SKIP"] if line and "rhetorical" in line else ANSWER.split(" ")
         for i, word in enumerate(words):
             piece = word if i == 0 else " " + word
             self.send_event(json.dumps({"choices": [{"delta": {"content": piece}}]}))

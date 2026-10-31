@@ -47,6 +47,9 @@ pub struct DisplayInfo {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub scale: f64,
     pub primary: bool,
+    /// The camera housing cut into the top edge (MacBooks since 2021), in
+    /// the same global coordinates; `None` on displays without one.
+    pub notch: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

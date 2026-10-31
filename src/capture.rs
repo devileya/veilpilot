@@ -189,6 +189,7 @@ mod tests {
                 work_area: Rect::default(),
                 scale: w as f64 / points_w,
                 primary: true,
+                notch: None,
             },
         }
     }

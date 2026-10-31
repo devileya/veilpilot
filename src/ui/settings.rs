@@ -84,6 +84,8 @@ pub struct SettingsView {
     capturing: Option<String>,
     claude: Option<claude_code::Detection>,
     claude_probe: Option<String>,
+    cli: Option<crate::ai::cli::Detection>,
+    cli_probe: Option<String>,
     whisper: Option<whisper::Detection>,
     whisper_probe: Option<String>,
     devices: Vec<String>,
@@ -106,6 +108,8 @@ impl SettingsView {
             capturing: None,
             claude: None,
             claude_probe: None,
+            cli: None,
+            cli_probe: None,
             whisper: None,
             whisper_probe: None,
             devices: crate::audio::input_devices(),
@@ -204,6 +208,26 @@ impl SettingsView {
                     let found = crate::runtime::spawn(async move { claude_code::detect(&key).await }).await.ok();
                     let _ = this.update(cx, |this, cx| {
                         this.claude = found;
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
+        if let Some(ProviderKind::AgentCli(kind)) = chat_kind {
+            let opts = crate::ai::cli::CliOptions {
+                binary_path: snap.cfg.chat.agents.paths.get(kind.id()).cloned().unwrap_or_default(),
+                custom_command: snap.cfg.chat.agents.custom_command.clone(),
+            };
+            let key = format!("{}|{}|{}", kind.id(), opts.binary_path, opts.custom_command);
+            if self.cli_probe.as_ref() != Some(&key) {
+                self.cli_probe = Some(key);
+                self.cli = None;
+                cx.spawn(async move |this, cx| {
+                    let found =
+                        crate::runtime::spawn(async move { crate::ai::cli::detect(kind, &opts).await }).await.ok();
+                    let _ = this.update(cx, |this, cx| {
+                        this.cli = found;
                         cx.notify();
                     });
                 })
@@ -331,7 +355,10 @@ impl SettingsView {
             return;
         }
 
-        let structural = path == "chat.claudeCode.binaryPath" || path.starts_with("transcription.whisperCpp.");
+        let structural = path == "chat.claudeCode.binaryPath"
+            || path.starts_with("transcription.whisperCpp.")
+            || path.starts_with("chat.agents.")
+            || path == "live.names";
         let path = path.to_string();
         let mut normalized: Option<String> = None;
         self.set(window, cx, false, |c| match path.as_str() {
@@ -375,6 +402,25 @@ impl SettingsView {
             "capture.keepLast" => {
                 c.capture.keep_last = num(&value, 1.0, 20.0, c.capture.keep_last as f64) as usize;
                 normalized = Some(c.capture.keep_last.to_string());
+            }
+            "chat.agents.customCommand" => c.chat.agents.custom_command = value.trim().to_string(),
+            p if p.starts_with("chat.agents.path.") => {
+                let id = p.trim_start_matches("chat.agents.path.").to_string();
+                let v = value.trim().to_string();
+                if v.is_empty() {
+                    c.chat.agents.paths.remove(&id);
+                } else {
+                    c.chat.agents.paths.insert(id, v);
+                }
+            }
+            "live.names" => c.live.names = value.trim().to_string(),
+            "live.contextLines" => {
+                c.live.context_lines = num(&value, 1.0, 200.0, c.live.context_lines as f64) as u32;
+                normalized = Some(c.live.context_lines.to_string());
+            }
+            "live.summaryPrompt" => {
+                c.live.summary_prompt =
+                    if value.trim().is_empty() { crate::config::SUMMARY_PROMPT.to_string() } else { value.clone() };
             }
             "window.opacity" => {
                 c.window.opacity = num(&value, 0.25, 1.0, c.window.opacity as f64) as f32;
@@ -575,6 +621,80 @@ impl SettingsView {
 
     /* ---------- views ---------- */
 
+    fn view_agent_cli(
+        &mut self,
+        kind: crate::config::CliKind,
+        snap: &Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use crate::config::CliKind;
+        let chat = &snap.cfg.chat;
+        let mut out = Vec::new();
+        out.push(match &self.cli {
+            None => hint("Looking for it…").mb(px(14.)).into_any_element(),
+            Some(found) if found.ok => hint(format!(
+                "Found {}**{}**. It answers with the login it already has — no API key here.",
+                found.version.as_deref().map(|v| format!("**{v}** at ")).unwrap_or_default(),
+                found.path.clone().unwrap_or_default()
+            ))
+            .mb(px(14.))
+            .into_any_element(),
+            Some(found) => {
+                hint_colored(found.error.clone().unwrap_or_default(), theme::live()).mb(px(14.)).into_any_element()
+            }
+        });
+        if kind == CliKind::Custom {
+            let command = self.input(
+                "chat.agents.customCommand",
+                &chat.agents.custom_command,
+                "llm -m gpt-4o {prompt}",
+                FieldKind::Text,
+                window,
+                cx,
+            );
+            out.push(
+                field(
+                    "Command",
+                    input_box(command),
+                    Some(hint("Any command that prints an answer. **{prompt}** is replaced by the question (with instructions and recent turns); without it, the question goes to stdin.").into_any_element()),
+                )
+                .into_any_element(),
+            );
+        } else {
+            let model = self.input("chat.model", &chat.model, "the CLI's default", FieldKind::Text, window, cx);
+            out.push(
+                field(
+                    "Model",
+                    input_box(model),
+                    Some(hint("Blank keeps the CLI's own default model.").into_any_element()),
+                )
+                .into_any_element(),
+            );
+            let path_key = format!("chat.agents.path.{}", kind.id());
+            let current = chat.agents.paths.get(kind.id()).cloned().unwrap_or_default();
+            let found = self.cli.as_ref().and_then(|c| c.path.clone()).unwrap_or_else(|| "auto-detect".into());
+            let path = self.input(&path_key, &current, &found, FieldKind::Text, window, cx);
+            out.push(
+                field(
+                    "Binary path",
+                    input_box(path),
+                    Some(
+                        hint(format!("Only needed if auto-detection fails. Install: {}.", kind.install_hint()))
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+        out.push(
+            hint("Runs in the picked project's folder (or a temp folder with no context), one question at a time. Screenshots are handed over as image files.")
+                .mb(px(15.))
+                .into_any_element(),
+        );
+        out
+    }
+
     fn view_claude_code(&mut self, snap: &Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let cc = snap.cfg.chat.claude_code.clone();
         let status = match &self.claude {
@@ -671,8 +791,20 @@ impl SettingsView {
                 self.select(
                     "chat.provider",
                     &chat.provider,
-                    PROVIDERS.iter().filter(|p| p.chat).map(|p| (p.id.to_string(), p.label.to_string())).collect(),
-                    |this, v, window, cx| this.set(window, cx, true, move |c| c.chat.provider = v),
+                    PROVIDERS
+                        .iter()
+                        .filter(|p| p.chat)
+                        .map(|p| (p.id.to_string(), p.label.to_string()))
+                        .chain(
+                            crate::devcat::connections()
+                                .into_iter()
+                                .map(|c| (c.provider_id(), format!("DevCat · {}", c.name))),
+                        )
+                        .collect(),
+                    |this, v, window, cx| {
+                        this.with_panel(window, cx, |panel, window, cx| panel.set_agent(&v, window, cx));
+                        this.rebuild(cx);
+                    },
                     cx,
                 ),
                 None,
@@ -680,7 +812,26 @@ impl SettingsView {
             .into_any_element(),
         );
 
-        if is_cc {
+        let devcat_conn = crate::devcat::connection(&chat.provider);
+        if let Some(conn) = devcat_conn {
+            out.push(
+                hint(format!(
+                    "DevCat connection **{}** — {} at **{}**. The API key is read from DevCat's keychain item the first time you ask (macOS asks once; choose Always Allow).",
+                    conn.name,
+                    conn.protocol,
+                    if conn.base_url.is_empty() { "the provider default" } else { conn.base_url.as_str() }
+                ))
+                .mb(px(14.))
+                .into_any_element(),
+            );
+            let model = self.input("chat.model", &chat.model, &conn.model, FieldKind::Text, window, cx);
+            out.push(
+                field("Model", input_box(model), Some(hint("Blank uses the connection's model.").into_any_element()))
+                    .into_any_element(),
+            );
+        } else if let Some(ProviderKind::AgentCli(cli_kind)) = kind {
+            out.extend(self.view_agent_cli(cli_kind, snap, window, cx));
+        } else if is_cc {
             let model = self.input("chat.model", &chat.model, "whatever Claude Code uses", FieldKind::Text, window, cx);
             out.push(
                 field(
@@ -780,6 +931,31 @@ impl SettingsView {
                 .into_any_element(),
             );
         }
+        out.push(section("Context", false).into_any_element());
+        let use_memory = snap.cfg.context.use_memory;
+        out.push(
+            field(
+                "Project memory",
+                checkbox("use-memory", use_memory, "Give the agent the picked project's DevCat memory", {
+                    let me = me.clone();
+                    move |on, window, cx| {
+                        let _ = me.update(cx, |this, cx| this.set(window, cx, false, |c| c.context.use_memory = on));
+                    }
+                }),
+                Some(
+                    hint(if crate::devcat::present() {
+                        format!(
+                            "Pick a project (or **No context**) at the top of the panel. Projects and memory come from DevCat: **{}**.",
+                            crate::devcat::data_dir().display()
+                        )
+                    } else {
+                        "Projects and memory come from DevCat, which was not found on this machine.".to_string()
+                    })
+                    .into_any_element(),
+                ),
+            )
+            .into_any_element(),
+        );
         let system = self.input("chat.systemPrompt", &chat.system_prompt, "", FieldKind::Area(7), window, cx);
         out.push(
             field(
@@ -1079,6 +1255,63 @@ impl SettingsView {
             .into_any_element(),
         );
 
+        out.push(section("Live answers", false).into_any_element());
+        let live = snap.cfg.live.clone();
+        let names = self.input("live.names", &live.names, "Arif, Rif", FieldKind::Text, window, cx);
+        out.push(
+            field(
+                "Your name",
+                input_box(names),
+                Some(hint("Comma separated, with nicknames. Speech to text misspells names, so one letter off still counts.").into_any_element()),
+            )
+            .into_any_element(),
+        );
+        out.push(
+            field(
+                "Answer by itself",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.))
+                    .child(checkbox("auto-answer", live.auto_answer, "When a question is heard in the transcript", {
+                        let me = me.clone();
+                        move |on, window, cx| {
+                            let _ = me.update(cx, |this, cx| this.set(window, cx, false, |c| c.live.auto_answer = on));
+                        }
+                    }))
+                    .child(checkbox("answer-on-name", live.answer_on_name, "When someone says my name", {
+                        let me = me.clone();
+                        move |on, window, cx| {
+                            let _ = me.update(cx, |this, cx| this.set(window, cx, false, |c| c.live.answer_on_name = on));
+                        }
+                    })),
+                Some(hint("Answers appear in the Live tab, or drop down from the notch in notch mode. The agent skips lines that need no answer from you.").into_any_element()),
+            )
+            .into_any_element(),
+        );
+        let context_lines =
+            self.input("live.contextLines", &live.context_lines.to_string(), "20", FieldKind::Number, window, cx);
+        out.push(
+            field(
+                "Transcript context (lines)",
+                input_box(context_lines),
+                Some(hint("How much of the conversation the agent sees with each live answer.").into_any_element()),
+            )
+            .into_any_element(),
+        );
+        let summary = self.input("live.summaryPrompt", &live.summary_prompt, "", FieldKind::Area(4), window, cx);
+        out.push(
+            field(
+                "Summary prompt",
+                input_box(summary),
+                Some(
+                    hint("Used by Summarize and Save to memory. **{{transcript}}** is the whole transcript.")
+                        .into_any_element(),
+                ),
+            )
+            .into_any_element(),
+        );
+
         out.push(section("Input", false).into_any_element());
         let mut devices = vec![(String::new(), "System default".to_string())];
         devices.extend(self.devices.iter().map(|d| (d.clone(), d.clone())));
@@ -1200,6 +1433,31 @@ impl SettingsView {
         );
 
         out.push(section("Panel", false).into_any_element());
+        let has_notch = crate::platform::displays().iter().any(|d| d.notch.is_some());
+        out.push(
+            field(
+                "Display",
+                self.select(
+                    "window.mode",
+                    if win.notch() { "notch" } else { "panel" },
+                    vec![
+                        ("panel".into(), "Floating panel".into()),
+                        ("notch".into(), if has_notch { "Notch island".into() } else { "Top island".into() }),
+                    ],
+                    |this, v, window, cx| {
+                        this.with_panel(window, cx, |panel, window, cx| {
+                            if panel.cfg.window.notch() != (v == "notch") {
+                                panel.toggle_notch(window, cx);
+                            }
+                        });
+                        cx.notify();
+                    },
+                    cx,
+                ),
+                Some(hint("The island sits around the notch (or at the top of the screen) and drops new answers down; hover keeps it open, a click opens the full chat. Also on the notch chip and its hotkey.").into_any_element()),
+            )
+            .into_any_element(),
+        );
         let opacity = self.input("window.opacity", &win.opacity.to_string(), "1", FieldKind::Number, window, cx);
         out.push(field("Opacity", input_box(opacity), None).into_any_element());
         let toggle = |id: &'static str, value: bool, label: &'static str, apply: fn(&mut Config, bool)| {

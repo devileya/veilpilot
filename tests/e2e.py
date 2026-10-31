@@ -8,8 +8,10 @@ at tests/mock_llm.py, and exercises the features a user reaches by hotkey,
 click, and keystroke — then checks the app's state and what it sent over the
 wire. Nothing touches your real config or keychain entry.
 
---claude-code also runs three tiny real asks through your `claude` CLI login
+--claude-code also runs a few tiny real asks through your `claude` CLI login
 (a few cents). Speech tests use whisper.cpp and a ggml model when present.
+DevCat projects and memory live in a throwaway DevCat folder; saving memory
+goes through the real `devcat mcp` when DevCat is installed.
 """
 
 import json
@@ -45,8 +47,10 @@ def free_port():
 
 
 class App:
-    def __init__(self, data_dir):
-        self.env = dict(os.environ, VEILPILOT_DATA_DIR=str(data_dir))
+    def __init__(self, data_dir, devcat_dir):
+        # DEVCAT_TEST_MEMORY_SECRETS keeps `devcat mcp` off the keychain.
+        self.env = dict(os.environ, VEILPILOT_DATA_DIR=str(data_dir), VEILPILOT_DEVCAT_DIR=str(devcat_dir),
+                        DEVCAT_TEST_MEMORY_SECRETS="1")
         self.proc = None
 
     def start(self):
@@ -127,7 +131,9 @@ def main():
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     mock = subprocess.Popen([sys.executable, str(ROOT / "tests/mock_llm.py"), str(port)], cwd=mock_dir)
-    app = App(data)
+    devcat = data / "devcat"
+    make_devcat(devcat, data / "repo")
+    app = App(data, devcat)
     try:
         app.start()
         run(app, base, mock_dir, data)
@@ -142,6 +148,26 @@ def main():
     for name in failed:
         print(f"  failed: {name}")
     return 1 if failed else 0
+
+
+def make_devcat(devcat, repo):
+    """A DevCat data folder with two projects, one of them with a memory."""
+    repo.mkdir()
+    (devcat / "memory/projects/shop").mkdir(parents=True)
+    (devcat / "projects.json").write_text(json.dumps([
+        {"id": "shop", "name": "Shop", "order": 0, "folders": [str(repo)]},
+        {"id": "misc", "name": "Misc", "order": 1},
+    ]))
+    (devcat / "memory/projects/shop/release-day.md").write_text(
+        "---\nname: release-day\ndescription: Shop releases ship on Fridays after QA signs off\n"
+        "metadata:\n  type: project\n  origin: claude-code\n  updated: 2026-10-30T12:00:00Z\n---\n\n"
+        "Releases go out Friday afternoon once QA signs off in #qa.\n")
+
+
+def script(path, body):
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+    return path
 
 
 def run(app, base, mock_dir, data):
@@ -214,7 +240,7 @@ def run(app, base, mock_dir, data):
     check("attachment is consumed by the ask", app.state()["attachments"] == [])
 
     app.send("action", "RegionShot")
-    for _ in range(40):
+    for _ in range(100):
         if app.state()["regionOpen"]:
             break
         time.sleep(0.1)
@@ -344,6 +370,10 @@ def run(app, base, mock_dir, data):
     check("key never lands in config.json", "sk-e2e-key" not in (data / "config.json").read_text())
     app.send("settings", "close")
 
+    agents_and_memory(app, base, mock_dir, data)
+    live_answers(app, base, mock_dir, data)
+    notch_mode(app)
+
     print("speech to text")
     wav = data / "speech.wav"
     voice = subprocess.run(["say", "-v", "Damayanti", "Halo semua, kita perlu deploy hari Jumat.", "-o",
@@ -375,6 +405,207 @@ def run(app, base, mock_dir, data):
         check("Claude Code answers", "PINEAPPLE" in card["text"] and "$" in card["meta"], card)
         card = app.ask("Which word did I just ask you to reply with? One word.")
         check("Claude Code resumes the session", "PINEAPPLE" in card["text"].upper(), card)
+        app.set_config({"live": {"autoAnswer": True}})
+        app.send("transcript", "Quick check before we continue: what is two plus two?")
+        app.idle()
+        live = app.state()["live"]
+        answer = live[-1]["answer"].lower() if live else ""
+        check("Claude Code gives a live answer", bool(live) and live[-1]["done"] and ("4" in answer or "four" in answer),
+              live)
+        app.set_config({"live": {"autoAnswer": False}})
+
+
+def agents_and_memory(app, base, mock_dir, data):
+    print("context and agents")
+    devcat = data / "devcat"
+    app.set_config({"chat": {"provider": "custom", "baseUrl": f"{base}/v1", "model": "mock-model"}})
+    app.send("action", "NewSession")
+    check("no context by default", app.state()["context"] == "")
+    app.ask("when do we release?")
+    system = requests(mock_dir)[-1]["body"]["messages"][0]["content"]
+    check("no context sends no project memory", "Project context" not in system)
+
+    app.send("menu", "context")
+    check("context menu opens", app.state()["openMenu"] == "Context")
+    app.send("choose", "shop")
+    s = app.state()
+    check("picking a project sets the context", s["context"] == "shop" and s["openMenu"] is None)
+    check("the toast counts its memories", "Shop — 1 memory available" in s["toasts"][-1], s["toasts"])
+    app.ask("when do we release?")
+    system = requests(mock_dir)[-1]["body"]["messages"][0]["content"]
+    check("the project's memory reaches the model", 'Project context: "Shop"' in system
+          and "Releases go out Friday afternoon" in system, system[-300:])
+    app.set_config({"context": {"useMemory": False}})
+    app.ask("and again?")
+    system = requests(mock_dir)[-1]["body"]["messages"][0]["content"]
+    check("memory can be switched off", "Releases go out" not in system)
+    app.set_config({"context": {"useMemory": True}})
+
+    agents = {a["id"]: a for a in json.loads(app.send("agents"))}
+    groups = [a["group"] for a in agents.values()]
+    check("agent menu groups stay together", groups == sorted(groups, key=["Model APIs", "Agents on this Mac",
+                                                                           "DevCat Agent"].index), groups)
+    check("custom CLI asks for its command first", agents["customcli"]["unavailable"] == "set the command in Settings")
+
+    fake = script(data / "fake-cli.sh", "printf 'CLI heard: '\ncat | tail -c 60\n")
+    app.set_config({"chat": {"agents": {"customCommand": str(fake)}}})
+    app.send("menu", "agent")
+    app.send("choose", "customcli")
+    check("switching agent is announced", app.state()["toasts"][-1] == "Info: Answering with Custom CLI.")
+    card = app.ask("ping from e2e")
+    check("a custom CLI answers through stdin", card["done"] and "CLI heard:" in card["text"]
+          and "ping from e2e" in card["text"], card)
+
+    args_file = data / "codex-args.txt"
+    codex = script(data / "fake-codex", f"""printf '%s\\n' "$@" > '{args_file}'
+pwd -P >> '{args_file}'
+cat > /dev/null
+echo '{{"type":"thread.started","thread_id":"t1"}}'
+echo '{{"type":"item.completed","item":{{"id":"i0","type":"reasoning","text":"thinking"}}}}'
+echo '{{"type":"item.completed","item":{{"id":"i1","type":"agent_message","text":"Codex says **hi**"}}}}'
+""")
+    app.set_config({"chat": {"agents": {"paths": {"codex": str(codex)}}}})
+    app.send("menu", "agent")
+    app.send("choose", "codex")
+    card = app.ask("hello codex")
+    args = args_file.read_text().splitlines()
+    check("Codex runs read-only, headless", args[:5] == ["exec", "--json", "--skip-git-repo-check", "--sandbox",
+                                                         "read-only"] and args[-2] == "-", args)
+    check("Codex runs in the project's folder", args[-1] == str((data / "repo").resolve()), args[-1])
+    check("Codex's JSON answer is shown", card["done"] and card["text"].strip() == "Codex says **hi**", card)
+
+    app.send("menu", "agent")
+    app.send("choose", "custom")
+    check("an API provider keeps its model and URL", app.config()["chat"]["baseUrl"] == f"{base}/v1"
+          and app.config()["chat"]["model"] == "mock-model", app.config()["chat"])
+
+    print("summary and memory")
+    app.send("action", "NewSession")
+    app.send("action", "Summarize")
+    check("summary of nothing warns", "Nothing to summarize" in app.state()["toasts"][-1], app.state()["toasts"])
+    app.send("transcript", "Kita sepakat rilis hari Jumat setelah QA.")
+    app.send("action", "Summarize")
+    app.idle()
+    s = app.state()
+    check("summarize makes a summary card", s["cards"][-1]["label"] == "Summary" and s["cards"][-1]["done"]
+          and s["summary"], s["cards"][-1])
+    sent = requests(mock_dir)[-1]["body"]["messages"][-1]["content"]
+    check("the summary prompt carries the transcript", sent.startswith("Ringkas transkrip")
+          and "Kita sepakat rilis hari Jumat" in sent, sent[-120:])
+
+    app.send("menu", "context")
+    app.send("choose", "")
+    before = sorted(p.name for p in (devcat / "memory/projects/shop").iterdir())
+    app.send("action", "SaveMemory")
+    check("nothing is saved without a project", "Pick a project first" in app.state()["toasts"][-1]
+          and sorted(p.name for p in (devcat / "memory/projects/shop").iterdir()) == before)
+    app.send("menu", "context")
+    app.send("choose", "shop")
+    app.send("action", "SaveMemory")
+    saved = None
+    for _ in range(100):
+        toast = app.state()["toasts"][-1]
+        if "Saved to" in toast or "Error" in toast:
+            break
+        time.sleep(0.2)
+    check("save to memory reports success", app.state()["toasts"][-1] == "Info: Saved to Shop's memory.",
+          app.state()["toasts"])
+    files = [p for p in (devcat / "memory/projects/shop").glob("meeting-*.md")]
+    saved = files[0].read_text() if files else ""
+    check("the meeting lands in the project's memory", saved.startswith("---\nname: meeting ")
+          and "origin: veilpilot" in saved and "## Summary" in saved
+          and "Kita sepakat rilis hari Jumat" in saved, saved[:300])
+    audit = devcat / "mcp-audit.jsonl"
+    if audit.exists():
+        entry = json.loads(audit.read_text().splitlines()[-1])
+        check("saved through DevCat's MCP server", entry["client"] == "veilpilot" and entry["tool"] == "memory_save"
+              and entry["ok"], entry)
+    else:
+        print("  [skip] DevCat is not installed: the file was written directly")
+    app.send("menu", "context")
+    app.send("choose", "")
+
+
+def live_answers(app, base, mock_dir, data):
+    print("live answers")
+    app.set_config({"live": {"names": "Arif, Pak Siregar", "autoAnswer": False, "answerOnName": False}})
+    app.send("action", "NewSession")
+    app.send("transcript", "Kapan rilisnya?")
+    time.sleep(0.5)
+    check("with both modes off, nothing answers by itself", app.state()["live"] == [])
+    app.send("action", "ToggleAutoAnswer")
+    check("the hotkey turns auto-answer on", app.config()["live"]["autoAnswer"])
+    sent = len(requests(mock_dir))
+    app.send("transcript", "Oke, kita lanjut ke agenda berikutnya.")
+    time.sleep(0.5)
+    check("a statement is not answered", len(requests(mock_dir)) == sent and app.state()["live"] == [])
+    app.send("transcript", "Kapan versi dua dirilis?")
+    app.idle()
+    s = app.state()
+    check("a question is answered by itself", len(s["live"]) == 1 and s["live"][0]["trigger"] == "question"
+          and s["live"][0]["done"] and "root cause" in s["live"][0]["answer"], s["live"])
+    check("the answer opens the Live tab", s["tab"] == "Live")
+    prompt = requests(mock_dir)[-1]["body"]["messages"][-1]["content"]
+    check("the live prompt carries recent lines", "- Oke, kita lanjut" in prompt and "- Kapan versi dua dirilis?" in prompt
+          and "SKIP" in prompt, prompt[:200])
+    app.send("transcript", "Pertanyaan rhetorical, siapa yang tahu?")
+    app.idle()
+    check("an answer the model skips is dropped", len(app.state()["live"]) == 1, app.state()["live"])
+
+    app.send("action", "ToggleAutoAnswer")
+    app.set_config({"live": {"answerOnName": True}})
+    app.send("transcript", "Arief tadi bilang deploy pakai skrip baru.")
+    app.idle()
+    s = app.state()
+    check("someone saying your name (misspelt) gets an answer", len(s["live"]) == 2
+          and s["live"][-1]["trigger"] == "your name", s["live"])
+    app.send("transcript", "Ari sudah datang belum?")
+    time.sleep(0.5)
+    check("a different name does not", len(app.state()["live"]) == 2)
+    app.send("key", "ctrl-tab")
+    check("ctrl-tab moves to the next tab", app.state()["tab"] == "Transcript", app.state()["tab"])
+    app.send("key", "ctrl-tab")
+    check("and wraps around", app.state()["tab"] == "Chat", app.state()["tab"])
+    app.set_config({"live": {"answerOnName": False}})
+
+
+def notch_mode(app):
+    print("notch mode")
+    app.send("action", "ToggleNotch")
+    time.sleep(1.0)
+    s = app.state()
+    check("notch mode swaps the panel for the island", s["notch"] and s["islandVisible"] and not s["visible"], s)
+    collapsed = s["islandFrame"]
+    app.set_config({"live": {"autoAnswer": True}})
+    app.send("transcript", "Bagaimana kalau kita tunda ke minggu depan?")
+    app.idle()
+    time.sleep(0.5)
+    grown = app.state()["islandFrame"]
+    check("a live answer drops down from the island", grown["height"] > collapsed["height"] + 100, (collapsed, grown))
+    app.send("action", "ToggleOverlay")
+    time.sleep(0.4)
+    check("the hide hotkey hides the island", not app.state()["islandVisible"])
+    app.send("action", "ToggleOverlay")
+    time.sleep(0.4)
+    check("and shows it again", app.state()["islandVisible"])
+    app.send("action", "ToggleNotch")
+    time.sleep(1.0)
+    s = app.state()
+    check("panel mode brings the panel back", not s["notch"] and not s["islandVisible"] and s["visible"], s)
+    check("the live answer is in the Live tab", len(s["live"]) >= 1)
+    app.set_config({"live": {"autoAnswer": False}})
+
+    app.send("key", "escape")
+    time.sleep(0.3)
+    app.send("spurious-key")
+    time.sleep(0.5)
+    try:
+        alive = app.state() is not None
+    except Exception:
+        alive = False
+    check("a spurious key-window change does not hang the app", alive)
+    app.send("action", "ToggleOverlay")
+    time.sleep(0.3)
 
 
 def pause_test(app, data):

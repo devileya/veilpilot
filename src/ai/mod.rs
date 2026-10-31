@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 pub mod claude_code;
+pub mod cli;
 pub mod openai;
 pub mod sse;
 
@@ -50,6 +51,9 @@ pub struct ClaudeCodeOptions {
     pub max_budget_usd: f64,
     pub session_id: Option<String>,
     pub resume_id: Option<String>,
+    /// One-off asks (live answers, summaries) leave nothing in Claude
+    /// Code's session history.
+    pub ephemeral: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +69,9 @@ pub struct StreamOptions {
     pub show_thinking: bool,
     pub server_side_fallback: bool,
     pub claude_code: Option<ClaudeCodeOptions>,
+    pub cli: Option<cli::CliOptions>,
+    /// Where agents run: the picked project's folder, or a temp dir.
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 pub type ChunkSender = mpsc::UnboundedSender<Chunk>;
@@ -152,6 +159,7 @@ pub fn start(opts: StreamOptions) -> Running {
                 ProviderKind::OpenAi => openai::stream(&opts, &chunk_tx).await,
                 ProviderKind::Anthropic => anthropic::stream(&opts, &chunk_tx).await,
                 ProviderKind::ClaudeCode => claude_code::stream(&opts, &chunk_tx).await,
+                ProviderKind::AgentCli(kind) => cli::stream(&opts, kind, &chunk_tx).await,
                 ProviderKind::WhisperCpp => {
                     Err(anyhow::anyhow!("Local (whisper.cpp) only transcribes — pick a chat provider in Settings."))
                 }

@@ -1,3 +1,4 @@
+pub mod island;
 pub mod markdown;
 pub mod panel;
 pub mod region;

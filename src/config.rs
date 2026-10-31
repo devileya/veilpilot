@@ -36,8 +36,59 @@ pub enum ProviderKind {
     Anthropic,
     /// The local `claude` CLI in headless stream-json mode.
     ClaudeCode,
+    /// Another coding agent's CLI, run one-shot (see `ai::cli`).
+    AgentCli(CliKind),
     /// On-device whisper.cpp; transcription only.
     WhisperCpp,
+}
+
+/// The agent CLIs DevCat runs, besides Claude Code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CliKind {
+    Codex,
+    Gemini,
+    Opencode,
+    Copilot,
+    Aider,
+    /// Any command; `{prompt}` in its arguments is replaced by the prompt.
+    Custom,
+}
+
+impl CliKind {
+    pub fn id(self) -> &'static str {
+        match self {
+            CliKind::Codex => "codex",
+            CliKind::Gemini => "gemini",
+            CliKind::Opencode => "opencode",
+            CliKind::Copilot => "copilot",
+            CliKind::Aider => "aider",
+            CliKind::Custom => "customcli",
+        }
+    }
+
+    /// The binary looked up on PATH; `None` for a custom command.
+    pub fn binary(self) -> Option<&'static str> {
+        match self {
+            CliKind::Codex => Some("codex"),
+            CliKind::Gemini => Some("gemini"),
+            CliKind::Opencode => Some("opencode"),
+            CliKind::Copilot => Some("copilot"),
+            CliKind::Aider => Some("aider"),
+            CliKind::Custom => None,
+        }
+    }
+
+    /// How to install it — the same hints DevCat shows.
+    pub fn install_hint(self) -> &'static str {
+        match self {
+            CliKind::Codex => "npm i -g @openai/codex, then run `codex login` once",
+            CliKind::Gemini => "npm i -g @google/gemini-cli, then run `gemini` once to sign in",
+            CliKind::Opencode => "npm i -g opencode-ai, then run `opencode auth login`",
+            CliKind::Copilot => "npm i -g @github/copilot, then run `copilot` once to sign in",
+            CliKind::Aider => "pip install aider-chat",
+            CliKind::Custom => "name a command in Settings › AI",
+        }
+    }
 }
 
 impl ProviderKind {
@@ -46,8 +97,14 @@ impl ProviderKind {
             ProviderKind::OpenAi => "openai",
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::ClaudeCode => "claudecode",
+            ProviderKind::AgentCli(kind) => kind.id(),
             ProviderKind::WhisperCpp => "whispercpp",
         }
+    }
+
+    /// Runs a local agent CLI rather than calling an API with a key.
+    pub fn is_agent(self) -> bool {
+        matches!(self, ProviderKind::ClaudeCode | ProviderKind::AgentCli(_))
     }
 }
 
@@ -109,6 +166,37 @@ pub static PROVIDERS: &[Provider] = &[
         needs_key: false,
         key_url: "https://code.claude.com/docs/en/quickstart",
         ..provider("claudecode", "Claude Code", ProviderKind::ClaudeCode)
+    },
+    Provider {
+        needs_key: false,
+        key_url: "https://github.com/openai/codex",
+        ..provider("codex", "Codex", ProviderKind::AgentCli(CliKind::Codex))
+    },
+    Provider {
+        needs_key: false,
+        key_url: "https://github.com/google-gemini/gemini-cli",
+        ..provider("gemini", "Gemini CLI", ProviderKind::AgentCli(CliKind::Gemini))
+    },
+    Provider {
+        needs_key: false,
+        key_url: "https://opencode.ai",
+        ..provider("opencode", "opencode", ProviderKind::AgentCli(CliKind::Opencode))
+    },
+    Provider {
+        needs_key: false,
+        key_url: "https://github.com/github/copilot-cli",
+        ..provider("copilot", "GitHub Copilot CLI", ProviderKind::AgentCli(CliKind::Copilot))
+    },
+    Provider {
+        needs_key: false,
+        vision: false,
+        key_url: "https://aider.chat",
+        ..provider("aider", "Aider", ProviderKind::AgentCli(CliKind::Aider))
+    },
+    Provider {
+        needs_key: false,
+        vision: false,
+        ..provider("customcli", "Custom CLI", ProviderKind::AgentCli(CliKind::Custom))
     },
     Provider {
         base_url: "https://open.bigmodel.cn/api/paas/v4",
@@ -183,6 +271,19 @@ pub struct ClaudeCodeConfig {
     pub max_budget_usd: f64,
 }
 
+/// The other agent CLIs.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AgentsConfig {
+    /// Binary path overrides, by CLI id; missing -> probe PATH and the usual
+    /// install locations.
+    pub paths: std::collections::BTreeMap<String, String>,
+    /// The custom CLI: a command line where `{prompt}` is replaced by the
+    /// prompt, e.g. `llm -m gpt-4o {prompt}`. Without `{prompt}` the prompt
+    /// goes to stdin.
+    pub custom_command: String,
+}
+
 impl Default for ClaudeCodeConfig {
     fn default() -> Self {
         Self {
@@ -210,6 +311,17 @@ pub struct ChatConfig {
     pub server_side_fallback: bool,
     pub show_thinking: bool,
     pub claude_code: ClaudeCodeConfig,
+    pub agents: AgentsConfig,
+    /// Model and base URL last used with each provider, so switching agents
+    /// in the header and back keeps them.
+    pub remembered: std::collections::BTreeMap<String, RememberedChoice>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RememberedChoice {
+    pub model: String,
+    pub base_url: String,
 }
 
 impl Default for ChatConfig {
@@ -224,6 +336,8 @@ impl Default for ChatConfig {
             server_side_fallback: true,
             show_thinking: true,
             claude_code: ClaudeCodeConfig::default(),
+            agents: AgentsConfig::default(),
+            remembered: Default::default(),
         }
     }
 }
@@ -304,9 +418,66 @@ pub struct WindowBounds {
     pub height: f64,
 }
 
+/// What the agent knows about: nothing (the default), or a DevCat project
+/// and its memory.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ContextConfig {
+    /// DevCat project id; '' -> no project, no memory.
+    pub project: String,
+    /// Give the agent the project's memory when a project is picked.
+    pub use_memory: bool,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self { project: String::new(), use_memory: true }
+    }
+}
+
+pub const SUMMARY_PROMPT: &str = "Ringkas transkrip percakapan berikut dalam bahasa yang dipakai di transkrip. \
+Mulai dengan satu kalimat inti, lalu poin-poin: topik utama, keputusan, dan tindak lanjut \
+(siapa, apa, kapan). Jangan mengarang hal yang tidak ada di transkrip.\n\n{{transcript}}";
+
+/// Answers that come from the transcript by themselves.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LiveConfig {
+    /// Answer questions heard in the transcript.
+    pub auto_answer: bool,
+    /// Answer when someone says one of `names`.
+    pub answer_on_name: bool,
+    /// Your name and its variants, comma separated ("Arif, Rif").
+    pub names: String,
+    /// Transcript lines given to the model as context.
+    pub context_lines: u32,
+    pub summary_prompt: String,
+}
+
+impl Default for LiveConfig {
+    fn default() -> Self {
+        Self {
+            auto_answer: false,
+            answer_on_name: false,
+            names: String::new(),
+            context_lines: 20,
+            summary_prompt: SUMMARY_PROMPT.into(),
+        }
+    }
+}
+
+impl LiveConfig {
+    pub fn name_list(&self) -> Vec<String> {
+        self.names.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WindowConfig {
+    /// "panel" (the floating panel) or "notch" (an island at the top of
+    /// the screen that drops answers down).
+    pub mode: String,
     pub bounds: Option<WindowBounds>,
     pub opacity: f32,
     pub protection: bool,
@@ -316,7 +487,20 @@ pub struct WindowConfig {
 
 impl Default for WindowConfig {
     fn default() -> Self {
-        Self { bounds: None, opacity: 1.0, protection: true, click_through: false, show_on_start: true }
+        Self {
+            mode: "panel".into(),
+            bounds: None,
+            opacity: 1.0,
+            protection: true,
+            click_through: false,
+            show_on_start: true,
+        }
+    }
+}
+
+impl WindowConfig {
+    pub fn notch(&self) -> bool {
+        self.mode == "notch"
     }
 }
 
@@ -380,6 +564,10 @@ pub struct HotkeyConfig {
     pub move_down: String,
     pub move_left: String,
     pub move_right: String,
+    pub summarize: String,
+    pub save_memory: String,
+    pub toggle_notch: String,
+    pub toggle_auto_answer: String,
 }
 
 /// `Command` on macOS, `Control` elsewhere — the same split Electron's
@@ -410,6 +598,10 @@ impl Default for HotkeyConfig {
             move_down: "Alt+Shift+Down".into(),
             move_left: "Alt+Shift+Left".into(),
             move_right: "Alt+Shift+Right".into(),
+            summarize: acc("Y"),
+            save_memory: acc("U"),
+            toggle_notch: acc("N"),
+            toggle_auto_answer: acc("L"),
         }
     }
 }
@@ -432,10 +624,14 @@ pub enum HotkeyId {
     MoveDown,
     MoveLeft,
     MoveRight,
+    Summarize,
+    SaveMemory,
+    ToggleNotch,
+    ToggleAutoAnswer,
 }
 
 impl HotkeyId {
-    pub const ALL: [HotkeyId; 15] = [
+    pub const ALL: [HotkeyId; 19] = [
         HotkeyId::ToggleOverlay,
         HotkeyId::ShotOnly,
         HotkeyId::RegionShot,
@@ -451,6 +647,10 @@ impl HotkeyId {
         HotkeyId::MoveDown,
         HotkeyId::MoveLeft,
         HotkeyId::MoveRight,
+        HotkeyId::Summarize,
+        HotkeyId::SaveMemory,
+        HotkeyId::ToggleNotch,
+        HotkeyId::ToggleAutoAnswer,
     ];
 
     /// Short label for Settings › Keys.
@@ -471,6 +671,10 @@ impl HotkeyId {
             HotkeyId::MoveDown => "Move down",
             HotkeyId::MoveLeft => "Move left",
             HotkeyId::MoveRight => "Move right",
+            HotkeyId::Summarize => "Summarize",
+            HotkeyId::SaveMemory => "Save to memory",
+            HotkeyId::ToggleNotch => "Notch mode",
+            HotkeyId::ToggleAutoAnswer => "Auto-answer",
         }
     }
 
@@ -492,6 +696,10 @@ impl HotkeyId {
             HotkeyId::MoveDown => "Move down",
             HotkeyId::MoveLeft => "Move left",
             HotkeyId::MoveRight => "Move right",
+            HotkeyId::Summarize => "Summarize the transcript",
+            HotkeyId::SaveMemory => "Save to memory",
+            HotkeyId::ToggleNotch => "Notch mode",
+            HotkeyId::ToggleAutoAnswer => "Auto-answer",
         }
     }
 }
@@ -514,6 +722,10 @@ impl HotkeyConfig {
             HotkeyId::MoveDown => &self.move_down,
             HotkeyId::MoveLeft => &self.move_left,
             HotkeyId::MoveRight => &self.move_right,
+            HotkeyId::Summarize => &self.summarize,
+            HotkeyId::SaveMemory => &self.save_memory,
+            HotkeyId::ToggleNotch => &self.toggle_notch,
+            HotkeyId::ToggleAutoAnswer => &self.toggle_auto_answer,
         }
     }
 
@@ -534,6 +746,10 @@ impl HotkeyConfig {
             HotkeyId::MoveDown => &mut self.move_down,
             HotkeyId::MoveLeft => &mut self.move_left,
             HotkeyId::MoveRight => &mut self.move_right,
+            HotkeyId::Summarize => &mut self.summarize,
+            HotkeyId::SaveMemory => &mut self.save_memory,
+            HotkeyId::ToggleNotch => &mut self.toggle_notch,
+            HotkeyId::ToggleAutoAnswer => &mut self.toggle_auto_answer,
         };
         *slot = value;
     }
@@ -617,6 +833,8 @@ pub struct Config {
     pub transcription: TranscriptionConfig,
     pub capture: CaptureConfig,
     pub window: WindowConfig,
+    pub context: ContextConfig,
+    pub live: LiveConfig,
     pub prompts: Vec<PromptPreset>,
     pub hotkeys: HotkeyConfig,
 }
@@ -629,6 +847,8 @@ impl Default for Config {
             transcription: TranscriptionConfig::default(),
             capture: CaptureConfig::default(),
             window: WindowConfig::default(),
+            context: ContextConfig::default(),
+            live: LiveConfig::default(),
             prompts: default_prompts(),
             hotkeys: HotkeyConfig::default(),
         }
@@ -722,6 +942,8 @@ fn from_value_lenient(value: serde_json::Value) -> Config {
     section!("transcription", transcription);
     section!("capture", capture);
     section!("window", window);
+    section!("context", context);
+    section!("live", live);
     section!("prompts", prompts);
     section!("hotkeys", hotkeys);
     cfg

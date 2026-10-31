@@ -1,26 +1,30 @@
-//! The panel: state, the actions hotkeys / tray / clicks fire, and rendering.
+//! The panel: state, and the actions hotkeys, the tray and clicks fire.
+//! Rendering is in `view`, live answers / summaries / memory in `live`, and
+//! agent + project resolution in `agents`.
+
+mod agents;
+mod live;
+mod view;
+
+pub use live::LiveState;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{
-    Animation, AnimationExt as _, App, AsyncWindowContext, Context, Entity, FocusHandle, Focusable, FontWeight,
-    ImageSource, KeyBinding, MouseButton, MouseMoveEvent, MouseUpEvent, ScrollHandle, SharedString, Subscription, Task,
-    WeakEntity, Window, actions, div, img, linear_color_stop, linear_gradient, prelude::*, px, relative,
+    App, AsyncWindowContext, Context, Entity, FocusHandle, KeyBinding, MouseButton, MouseMoveEvent, MouseUpEvent,
+    ScrollHandle, Subscription, Task, WeakEntity, Window, actions, prelude::*, px,
 };
 use tokio_util::sync::CancellationToken;
 
-use super::markdown;
 use super::region::{RegionPicker, RegionResult};
 use super::settings::{SettingsTab, SettingsView};
 use super::text_input::{InputEvent, TextInput};
-use super::theme;
-use super::widgets::{caps, chrome_button, key_badge, swallow_mouse_down};
-use crate::ai::{self, Chunk, ClaudeCodeOptions, StreamEvent, StreamOptions};
+use crate::ai::{self, BuiltPrompt, Chunk, StreamEvent};
 use crate::audio::{self, Recorder};
 use crate::capture::{self, Shot};
-use crate::config::{self, Config, HotkeyId, ProviderKind, provider_by_id, resolve_chat};
+use crate::config::{self, Config, HotkeyId, ProviderKind};
 use crate::hotkeys::{Action, Failure, Hotkeys, pretty};
 use crate::platform::{self, NativeWindow, Permission, Rect};
 use crate::secrets::Secrets;
@@ -28,12 +32,14 @@ use crate::session::{ImagePart, Role, Session, Turn};
 use crate::transcribe;
 use crate::tray::{Tray, TrayCommand};
 
-actions!(panel, [Escape, OpenSettings]);
+actions!(panel, [Escape, OpenSettings, NextTab, PrevTab]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("escape", Escape, Some("Panel")),
         KeyBinding::new("secondary-,", OpenSettings, Some("Panel")),
+        KeyBinding::new("ctrl-tab", NextTab, Some("Panel")),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Panel")),
     ]);
 }
 
@@ -57,9 +63,52 @@ pub struct Toast {
     pub text: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardKind {
+    Ask,
+    /// A transcript summary; its text is what "Save to memory" saves.
+    Summary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    Chat,
+    Live,
+    Transcript,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 3] = [Tab::Chat, Tab::Live, Tab::Transcript];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Tab::Chat => "Chat",
+            Tab::Live => "Live",
+            Tab::Transcript => "Transcript",
+        }
+    }
+}
+
+/// The header's open dropdown, if any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    Context,
+    Agent,
+}
+
+/// The newest answer, wherever it lives — what the notch island shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Latest {
+    Card(u64),
+    Live(u64),
+}
+
 #[derive(Clone, Debug)]
 pub struct Card {
     pub id: u64,
+    pub kind: CardKind,
+    /// What was typed, for typed asks (presets show their label instead).
+    pub prompt: String,
     pub label: String,
     pub accelerator: Option<String>,
     pub meta: String,
@@ -126,7 +175,25 @@ pub struct Panel {
     pub input: Entity<TextInput>,
     pub attachments: Vec<Arc<Shot>>,
 
-    pub drawer_open: bool,
+    pub tab: Tab,
+    pub live: LiveState,
+    pub last_summary: Option<String>,
+    /// Transcript length when the summary was made: a longer transcript
+    /// means the summary is out of date.
+    summary_lines: usize,
+    save_after_summary: bool,
+    /// The summary that "Save to memory" waited for has arrived.
+    pending_save: bool,
+    pub open_menu: Option<Menu>,
+    pub cheatsheet_open: bool,
+    pub transcript_unseen: usize,
+    pub latest: Option<Latest>,
+    devcat_keys: std::collections::HashMap<String, String>,
+    pub island: Option<gpui::WindowHandle<super::island::Island>>,
+    pub island_native_cache: Option<NativeWindow>,
+    /// The island window is being opened (it opens after the current update).
+    pub island_opening: bool,
+    pub window_handle: gpui::AnyWindowHandle,
     transcript_scroll: ScrollHandle,
     readout_scroll: ScrollHandle,
 
@@ -197,7 +264,21 @@ impl Panel {
             cards: Vec::new(),
             input,
             attachments: Vec::new(),
-            drawer_open: false,
+            tab: Tab::Chat,
+            live: LiveState::default(),
+            last_summary: None,
+            summary_lines: 0,
+            save_after_summary: false,
+            pending_save: false,
+            open_menu: None,
+            cheatsheet_open: false,
+            transcript_unseen: 0,
+            latest: None,
+            devcat_keys: Default::default(),
+            island: None,
+            island_native_cache: None,
+            island_opening: false,
+            window_handle: window.window_handle(),
             transcript_scroll: ScrollHandle::new(),
             readout_scroll: ScrollHandle::new(),
             recording: None,
@@ -271,7 +352,10 @@ impl Panel {
             );
         }
 
-        if self.cfg.window.show_on_start {
+        if self.cfg.window.notch() {
+            // Notch mode starts as the island; the full panel opens on demand.
+            self.show_island(true, cx);
+        } else if self.cfg.window.show_on_start {
             self.show(true, window, cx);
         }
     }
@@ -373,7 +457,25 @@ impl Panel {
         cx.notify();
     }
 
+    /// Bring answers into view without taking focus: the panel, or in notch
+    /// mode the island (the full panel opens only when asked for).
+    pub fn surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cfg.window.notch() {
+            self.show_island(true, cx);
+        } else {
+            self.show(false, window, cx);
+        }
+    }
+
     pub fn toggle_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cfg.window.notch() {
+            // In notch mode the island is the thing that hides and shows; the
+            // full panel goes away with it.
+            let showing = self.island_visible();
+            self.hide(cx);
+            self.show_island(!showing, cx);
+            return;
+        }
         if self.is_visible() {
             self.hide(cx);
         } else {
@@ -534,6 +636,10 @@ impl Panel {
                 HotkeyId::MoveDown => self.move_by(0.0, 48.0, cx),
                 HotkeyId::MoveLeft => self.move_by(-48.0, 0.0, cx),
                 HotkeyId::MoveRight => self.move_by(48.0, 0.0, cx),
+                HotkeyId::Summarize => self.summarize(window, cx),
+                HotkeyId::SaveMemory => self.save_memory(window, cx),
+                HotkeyId::ToggleNotch => self.toggle_notch(window, cx),
+                HotkeyId::ToggleAutoAnswer => self.toggle_auto_answer(cx),
             },
         }
     }
@@ -576,9 +682,14 @@ impl Panel {
 
     pub fn new_session(&mut self, cx: &mut Context<Self>) {
         self.cancel(cx);
+        self.cancel_live(cx);
         self.session.clear();
         self.cards.clear();
         self.attachments.clear();
+        self.live = LiveState::default();
+        self.last_summary = None;
+        self.latest = None;
+        self.transcript_unseen = 0;
         self.toast(ToastKind::Info, "New session.", cx);
         cx.notify();
     }
@@ -593,6 +704,8 @@ impl Panel {
 
     pub fn clear_transcript(&mut self, cx: &mut Context<Self>) {
         self.session.clear_transcript();
+        self.last_summary = None;
+        self.transcript_unseen = 0;
         cx.notify();
     }
 
@@ -602,7 +715,7 @@ impl Panel {
             return;
         };
         // Shown without focus so the meeting app keeps the keyboard.
-        self.show(false, window, cx);
+        self.surface(window, cx);
 
         if preset.source.wants_transcript() && self.session.transcript_text().is_empty() {
             let key = pretty(&self.cfg.hotkeys.record_toggle);
@@ -651,7 +764,7 @@ impl Panel {
             let shot = shot.await;
             let _ = this.update_in(cx, |this, window, cx| match shot {
                 Ok(Some(shot)) => {
-                    this.show(false, window, cx);
+                    this.surface(window, cx);
                     if !prompt.is_empty() && this.cfg.prompt(&prompt).is_some() {
                         this.ask(Some(prompt), String::new(), vec![shot], window, cx);
                     } else {
@@ -660,7 +773,7 @@ impl Panel {
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    this.show(false, window, cx);
+                    this.surface(window, cx);
                     this.toast(ToastKind::Error, err.to_string(), cx);
                 }
             });
@@ -760,8 +873,12 @@ impl Panel {
 
     fn fail(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.seq += 1;
+        self.tab = Tab::Chat;
+        self.latest = Some(Latest::Card(self.seq));
         self.cards.push(Card {
             id: self.seq,
+            kind: CardKind::Ask,
+            prompt: String::new(),
             label: "Error".into(),
             accelerator: None,
             meta: clock(capture::now_ms()),
@@ -784,29 +901,41 @@ impl Panel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let transcript = self.session.transcript_text();
+        let prompt = ai::build_prompt(&self.cfg, prompt_id.as_deref(), &input, &transcript);
+        let accelerator = prompt_id
+            .as_deref()
+            .and_then(|pid| self.cfg.prompt(pid))
+            .map(|p| p.accelerator.clone())
+            .filter(|a| !a.is_empty());
+        self.start_ask(prompt, accelerator, shots, CardKind::Ask, window, cx);
+    }
+
+    /// Ask the picked agent and stream the answer into a new chat card.
+    pub(super) fn start_ask(
+        &mut self,
+        prompt: BuiltPrompt,
+        accelerator: Option<String>,
+        shots: Vec<Arc<Shot>>,
+        kind: CardKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cancel(cx);
         self.close_settings(window, cx);
+        self.open_menu = None;
+        self.tab = Tab::Chat;
         // Shots sent with this ask are consumed, so a follow-up question
         // does not upload them a second time.
         self.attachments.retain(|a| !shots.iter().any(|s| s.id == a.id));
 
-        let provider = resolve_chat(&self.cfg, &|id| self.secrets.get(id));
-        let transcript = self.session.transcript_text();
-        let prompt = ai::build_prompt(&self.cfg, prompt_id.as_deref(), &input, &transcript);
-
         if prompt.text.is_empty() {
             return self.fail("Nothing to ask — type something or attach a screenshot.", cx);
         }
-        if provider.kind == ProviderKind::WhisperCpp {
-            return self.fail("Local (whisper.cpp) only transcribes — pick a chat provider in Settings.", cx);
-        }
-        if provider.needs_key && provider.api_key.is_empty() {
-            return self.fail(format!("No API key for {}. Open settings › Keys and paste one.", provider.label), cx);
-        }
-        // Claude Code picks its own model when none is named, so a blank is valid.
-        if provider.model.is_empty() && provider.kind != ProviderKind::ClaudeCode {
-            return self.fail(format!("No model set for {}. Add one in Settings.", provider.label), cx);
-        }
+        let provider = match self.resolve_answerer().and_then(|p| Self::usable(&p).map(|_| p)) {
+            Ok(p) => p,
+            Err(message) => return self.fail(message, cx),
+        };
 
         let mut notes = Vec::new();
         let mut images: Vec<ImagePart> =
@@ -814,9 +943,13 @@ impl Panel {
         if !images.is_empty() && !provider.vision {
             notes.push(format!(
                 "{} ({}) has no vision support — the screenshot was not sent.",
-                provider.label, provider.model
+                provider.label,
+                if provider.model.is_empty() { "default model" } else { provider.model.as_str() }
             ));
             images.clear();
+        }
+        if let Some(project) = self.context_project() {
+            notes.push(format!("Context: {}", project.name));
         }
 
         self.session.push_turn(Turn { role: Role::User, text: prompt.text.clone(), images });
@@ -824,17 +957,16 @@ impl Panel {
         self.seq += 1;
         let id = self.seq;
         let model = prompt.model.clone().unwrap_or_else(|| provider.model.clone());
-        let accelerator = prompt_id
-            .as_deref()
-            .and_then(|pid| self.cfg.prompt(pid))
-            .map(|p| p.accelerator.clone())
-            .filter(|a| !a.is_empty());
         let at = capture::now_ms();
+        let shown_model = if model.is_empty() { provider.label.clone() } else { model.clone() };
+        let typed = if prompt.label == "Ask" { prompt.text.chars().take(300).collect() } else { String::new() };
         self.cards.push(Card {
             id,
+            kind,
+            prompt: typed,
             label: prompt.label.clone(),
             accelerator,
-            meta: [model.clone(), clock(at)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "),
+            meta: [shown_model, clock(at)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "),
             shots: shots.clone(),
             thinking: String::new(),
             notes,
@@ -843,37 +975,15 @@ impl Panel {
             done: false,
         });
         self.readout_scroll.scroll_to_bottom();
+        self.latest = Some(Latest::Card(id));
 
         let effort = prompt.effort.clone().or_else(|| Some(self.cfg.chat.effort.clone()).filter(|e| !e.is_empty()));
         let claude = (provider.kind == ProviderKind::ClaudeCode).then(|| self.session.claude_session());
         let history = self.session.history();
-        let opts = StreamOptions {
-            kind: provider.kind,
-            base_url: provider.base_url.clone(),
-            api_key: provider.api_key.clone(),
-            model,
-            system: self.cfg.chat.system_prompt.clone(),
-            // Claude Code keeps the history itself, so it gets the newest turn only.
-            messages: if claude.is_some() { history.last().cloned().into_iter().collect() } else { history },
-            max_tokens: if self.cfg.chat.max_tokens == 0 { 8192 } else { self.cfg.chat.max_tokens },
-            effort: matches!(provider.kind, ProviderKind::Anthropic | ProviderKind::ClaudeCode)
-                .then_some(effort)
-                .flatten(),
-            show_thinking: self.cfg.chat.show_thinking,
-            server_side_fallback: self.cfg.chat.server_side_fallback,
-            claude_code: claude.as_ref().map(|handle| {
-                let cc = &self.cfg.chat.claude_code;
-                ClaudeCodeOptions {
-                    binary_path: cc.binary_path.clone(),
-                    cwd: cc.cwd.clone(),
-                    fast_start: cc.fast_start,
-                    allow_tools: cc.allow_tools,
-                    max_budget_usd: cc.max_budget_usd,
-                    session_id: (!handle.started).then(|| handle.id.clone()),
-                    resume_id: handle.started.then(|| handle.id.clone()),
-                }
-            }),
-        };
+        // Claude Code keeps the history itself, so it gets the newest turn only.
+        let messages = if claude.is_some() { history.last().cloned().into_iter().collect() } else { history };
+        let mut opts = self.stream_options(&provider, model, messages, effort);
+        opts.claude_code = claude.as_ref().map(|h| self.claude_options(Some(h)));
         let is_claude = claude.is_some();
 
         let running = ai::start(opts);
@@ -929,6 +1039,13 @@ impl Panel {
                 }
                 card.meta = bits.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
                 card.done = true;
+                if card.kind == CardKind::Summary {
+                    self.last_summary = Some(answer.clone());
+                    self.summary_lines = self.session.transcript_lines().len();
+                    if std::mem::take(&mut self.save_after_summary) {
+                        self.pending_save = true;
+                    }
+                }
                 self.session.push_turn(Turn { role: Role::Assistant, text: answer, images: Vec::new() });
                 // Only now is the Claude Code session real and resumable; a
                 // failed first attempt must still be able to name it.
@@ -961,6 +1078,13 @@ impl Panel {
         };
         if terminal && is_current {
             self.active = None;
+        }
+        if terminal && self.save_after_summary && self.cards.iter().any(|c| c.id == id && c.kind == CardKind::Summary) {
+            // The summary failed or was stopped: there is nothing to save.
+            self.save_after_summary = false;
+        }
+        if std::mem::take(&mut self.pending_save) {
+            self.save_memory_now(cx);
         }
         if at_bottom || terminal {
             self.readout_scroll.scroll_to_bottom();
@@ -1005,7 +1129,7 @@ impl Panel {
     }
 
     pub fn record_toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show(false, window, cx);
+        self.surface(window, cx);
         if self.recording.is_some() {
             self.stop_recording(cx);
         } else {
@@ -1160,11 +1284,37 @@ impl Panel {
     }
 
     pub fn append_transcript(&mut self, text: &str, cx: &mut Context<Self>) {
-        if self.session.append_transcript(text, capture::now_ms()).is_some() {
-            self.drawer_open = true;
+        if let Some(line) = self.session.append_transcript(text, capture::now_ms()) {
+            if self.tab != Tab::Transcript {
+                self.transcript_unseen += 1;
+            }
             self.transcript_scroll.scroll_to_bottom();
+            self.consider_live(&line.text, cx);
             cx.notify();
         }
+    }
+
+    pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        match tab {
+            Tab::Live => self.live.unseen = 0,
+            Tab::Transcript => {
+                self.transcript_unseen = 0;
+                self.transcript_scroll.scroll_to_bottom();
+            }
+            Tab::Chat => self.readout_scroll.scroll_to_bottom(),
+        }
+        cx.notify();
+    }
+
+    fn on_next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
+        let i = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
+        self.set_tab(Tab::ALL[(i + 1) % Tab::ALL.len()], cx);
+    }
+
+    fn on_prev_tab(&mut self, _: &PrevTab, _: &mut Window, cx: &mut Context<Self>) {
+        let i = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
+        self.set_tab(Tab::ALL[(i + Tab::ALL.len() - 1) % Tab::ALL.len()], cx);
     }
 
     /* ---------- toasts ---------- */
@@ -1265,535 +1415,6 @@ impl Panel {
         if self.resize.take().is_some() {
             self.queue_save_bounds(cx);
         }
-    }
-
-    /* ---------- rendering ---------- */
-
-    fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let hidden = self.cfg.window.protection;
-        let veil_color = if hidden { theme::lamp() } else { theme::live() };
-        let (rec_label, rec_color) = if self.is_recording() {
-            ("recording", theme::live())
-        } else if self.uploading > 0 {
-            ("transcribing", theme::lamp())
-        } else {
-            ("idle", theme::haze())
-        };
-        let streaming = self.is_streaming();
-
-        let dot = |color: gpui::Rgba| div().flex_none().size(px(5.)).rounded_full().bg(color);
-        let rec_dot = if self.is_recording() {
-            dot(rec_color)
-                .with_animation("rec-pulse", Animation::new(Duration::from_millis(1100)).repeat(), |d, t| {
-                    d.opacity(0.25 + 0.75 * ((t * std::f32::consts::TAU).cos() * 0.5 + 0.5))
-                })
-                .into_any_element()
-        } else {
-            dot(rec_color).into_any_element()
-        };
-
-        let seam = div().absolute().left_0().right_0().bottom_0().h(px(1.)).bg(theme::edge()).when(streaming, |d| {
-            d.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .h(px(1.))
-                    .w(relative(0.36))
-                    .bg(linear_gradient(
-                        90.,
-                        linear_color_stop(theme::hsla(theme::edge()), 0.),
-                        linear_color_stop(theme::hsla(theme::lamp()), 1.),
-                    ))
-                    .with_animation("seam", Animation::new(Duration::from_millis(1700)).repeat(), |d, t| {
-                        d.left(relative(-0.36 + 1.36 * t))
-                    }),
-            )
-        });
-
-        div()
-            .id("rail")
-            .relative()
-            .flex_none()
-            .h(px(theme::RAIL_H))
-            .flex()
-            .items_center()
-            .gap(px(9.))
-            .pl(px(theme::PAD))
-            .pr(px(10.))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.with_native(cx, |native| native.begin_drag());
-                    // The drag runs its own loop; the save fires once it ends.
-                    this.queue_save_bounds(cx);
-                }),
-            )
-            .child(img(ImageSource::Render(self.mark.clone())).flex_none().size(px(11.)))
-            .child(div().flex_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child("VeilPilot"))
-            .child(swallow_mouse_down(
-                div()
-                    .id("veil-state")
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .cursor_pointer()
-                    .text_color(veil_color)
-                    .child(dot(veil_color).when(hidden, |d| {
-                        d.shadow(vec![gpui::BoxShadow {
-                            color: theme::hsla(theme::lamp()).opacity(0.7),
-                            offset: gpui::point(px(0.), px(0.)),
-                            blur_radius: px(6.),
-                            spread_radius: px(0.),
-                        }])
-                    }))
-                    .child(caps(if hidden { "invisible" } else { "visible" }))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let next = !this.cfg.window.protection;
-                        this.set_protection(next, cx);
-                    })),
-            ))
-            .child(swallow_mouse_down(
-                div()
-                    .id("rec-state")
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .cursor_pointer()
-                    .text_color(rec_color)
-                    .hover(|s| s.text_color(theme::read()))
-                    .child(rec_dot)
-                    .child(caps(rec_label))
-                    .on_click(cx.listener(|this, _, window, cx| this.record_toggle(window, cx))),
-            ))
-            .child(chrome_button(
-                "gear",
-                "settings",
-                cx.listener(|this, _, window, cx| this.open_settings(None, window, cx)),
-            ))
-            .child(seam)
-    }
-
-    fn render_legend(&self) -> impl IntoElement {
-        let h = &self.cfg.hotkeys;
-        let mut rows: Vec<(String, String)> = self
-            .cfg
-            .prompts
-            .iter()
-            .map(|p| {
-                let what =
-                    if p.source == config::PromptSource::Transcript { "from transcript" } else { "screenshot + ask" };
-                (p.accelerator.clone(), format!("{} — {what}", p.label))
-            })
-            .collect();
-        rows.extend([
-            (h.region_shot.clone(), "Select a region, then ask".into()),
-            (h.shot_only.clone(), "Attach a screenshot, type your own question".into()),
-            (h.record_toggle.clone(), "Start / stop transcribing".into()),
-            (h.toggle_overlay.clone(), "Hide or show this panel".into()),
-            (h.cancel.clone(), "Stop generating".into()),
-        ]);
-
-        let chat = &self.cfg.chat;
-        let preset = provider_by_id(&chat.provider);
-        let label = preset.map(|p| p.label).unwrap_or(chat.provider.as_str()).to_string();
-        let model =
-            if chat.model.is_empty() { preset.map(|p| p.model).unwrap_or("").to_string() } else { chat.model.clone() };
-        let keyed = self.secrets.has(&chat.provider) || preset.is_some_and(|p| !p.needs_key);
-
-        let foot = if keyed {
-            div()
-                .flex()
-                .flex_wrap()
-                .child("Answering with ")
-                .child(div().text_color(theme::lamp()).font_weight(FontWeight::MEDIUM).child(label))
-                .when(!model.is_empty(), |d| d.child(format!(" · {model}")))
-        } else {
-            div()
-                .flex()
-                .flex_wrap()
-                .child("No API key for ")
-                .child(div().text_color(theme::lamp()).font_weight(FontWeight::MEDIUM).child(label))
-                .child(" yet — open ")
-                .child(div().text_color(theme::lamp()).font_weight(FontWeight::MEDIUM).child("settings"))
-                .child(" to add one.")
-        };
-
-        div()
-            .text_color(theme::haze())
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(theme::read())
-                    .mb(px(14.))
-                    .child("Nothing asked yet. Press a key."),
-            )
-            .child(div().flex().flex_col().gap(px(7.)).children(rows.into_iter().filter(|(a, _)| !a.is_empty()).map(
-                |(accel, what)| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(11.))
-                        .child(div().w(px(46.)).flex_none().flex().child(key_badge(pretty(&accel))))
-                        .child(div().flex_1().min_w_0().text_size(px(11.5)).child(what))
-                },
-            )))
-            .child(
-                div()
-                    .mt(px(16.))
-                    .pt(px(12.))
-                    .border_t_1()
-                    .border_color(theme::edge())
-                    .text_size(px(11.))
-                    .line_height(px(16.5))
-                    .child(foot),
-            )
-    }
-
-    fn render_card(&self, card: &Card, first: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let streaming = !card.done && self.active.as_ref().is_some_and(|a| a.id == card.id);
-        let body: Vec<gpui::AnyElement> = if let Some(error) = &card.error {
-            vec![div().text_color(theme::live()).child(error.clone()).into_any_element()]
-        } else if card.done && card.text.is_empty() {
-            vec![div().text_size(px(11.)).text_color(theme::lamp()).child("No text came back.").into_any_element()]
-        } else {
-            markdown::render(
-                &card.text,
-                markdown::RenderOptions {
-                    id: format!("card-{}", card.id).into(),
-                    caret: streaming,
-                    caret_visible: self.caret_visible,
-                },
-            )
-        };
-        let thinking: String = {
-            let chars: Vec<char> = card.thinking.chars().collect();
-            chars[chars.len().saturating_sub(400)..].iter().collect()
-        };
-        let copy_text = markdown::plain_text(&card.text);
-        let id = card.id;
-
-        div()
-            .pb(px(20.))
-            .when(!first, |d| d.border_t_1().border_color(theme::edge()).pt(px(16.)))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.))
-                    .mb(px(10.))
-                    .text_color(theme::haze())
-                    .when_some(card.accelerator.clone(), |d, a| d.child(key_badge(pretty(&a))))
-                    .child(caps(&card.label).text_color(theme::read()))
-                    .child(
-                        div().ml_auto().font_family(theme::mono_family()).text_size(px(9.5)).child(card.meta.clone()),
-                    ),
-            )
-            .children(card.shots.iter().map(|s| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(9.))
-                    .mb(px(11.))
-                    .child(
-                        div()
-                            .w(px(76.))
-                            .h(px(46.))
-                            .overflow_hidden()
-                            .border_1()
-                            .border_color(theme::edge())
-                            .rounded(px(3.))
-                            .child(
-                                img(ImageSource::Image(s.image.clone())).w(px(76.)).object_fit(gpui::ObjectFit::Cover),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .font_family(theme::mono_family())
-                            .text_size(px(9.5))
-                            .text_color(theme::haze())
-                            .child(format!("{}×{} px", s.width, s.height)),
-                    )
-            }))
-            .when(!thinking.is_empty(), |d| {
-                d.child(
-                    div()
-                        .mb(px(11.))
-                        .pl(px(10.))
-                        .border_l_1()
-                        .border_color(theme::lamp_dim())
-                        .text_size(px(11.))
-                        .line_height(px(17.))
-                        .text_color(theme::haze())
-                        .max_h(px(72.))
-                        .overflow_hidden()
-                        .font(theme::italic(theme::ui_font()))
-                        .child(thinking),
-                )
-            })
-            .children(
-                card.notes
-                    .iter()
-                    .map(|n| div().mb(px(10.)).text_size(px(11.)).text_color(theme::lamp()).child(n.clone())),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(9.5))
-                    .max_w(px(62. * 7.2))
-                    .text_size(px(13.5))
-                    .line_height(px(21.9))
-                    .text_color(theme::read())
-                    .children(body),
-            )
-            .when(card.done && card.error.is_none() && !card.text.is_empty(), |d| {
-                d.child(div().mt(px(11.)).flex().child(chrome_button(
-                    ("copy", id as usize),
-                    "copy",
-                    cx.listener(move |this, _, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
-                        this.toast(ToastKind::Info, "Copied.", cx);
-                    }),
-                )))
-            })
-    }
-
-    fn render_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let lines = self.session.transcript_lines();
-        let count = if lines.is_empty() { "empty".to_string() } else { format!("{} lines", lines.len()) };
-        let last = lines.len().saturating_sub(1);
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .border_t_1()
-            .border_color(theme::edge())
-            .when(self.drawer_open, |d| d.max_h(relative(0.38)))
-            .child(
-                div()
-                    .id("drawer-head")
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(theme::PAD))
-                    .py(px(9.))
-                    .cursor_pointer()
-                    .text_color(theme::haze())
-                    .hover(|s| s.text_color(theme::read()))
-                    .child(caps("transcript"))
-                    .child(div().ml_auto().font_family(theme::mono_family()).text_size(px(9.5)).child(count))
-                    .child(div().text_size(px(8.)).child(if self.drawer_open { "▲" } else { "▼" }))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.drawer_open = !this.drawer_open;
-                        cx.notify();
-                    })),
-            )
-            .when(self.drawer_open, |d| {
-                d.child(
-                    div()
-                        .id("transcript")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.transcript_scroll)
-                        .px(px(theme::PAD))
-                        .pb(px(10.))
-                        .font_family(theme::mono_family())
-                        .text_size(px(11.))
-                        .line_height(px(17.6))
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .children(lines.iter().enumerate().map(|(i, line)| {
-                            div()
-                                .flex()
-                                .gap(px(9.))
-                                .child(div().flex_none().text_color(theme::edge()).child(stamp(line.at)))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_color(if i == last { theme::read() } else { theme::haze() })
-                                        .child(line.text.clone()),
-                                )
-                        })),
-                )
-            })
-    }
-
-    fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex_none()
-            .border_t_1()
-            .border_color(theme::edge())
-            .when(!self.attachments.is_empty(), |d| {
-                d.child(div().flex().flex_wrap().gap(px(6.)).px(px(theme::PAD)).pt(px(8.)).children(
-                    self.attachments.iter().map(|s| {
-                        let id = s.id.clone();
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .pl(px(3.))
-                            .pr(px(4.))
-                            .py(px(3.))
-                            .bg(theme::glass())
-                            .border_1()
-                            .border_color(theme::edge())
-                            .rounded(px(3.))
-                            .child(div().w(px(30.)).h(px(19.)).overflow_hidden().rounded(px(2.)).child(
-                                img(ImageSource::Image(s.image.clone())).w(px(30.)).object_fit(gpui::ObjectFit::Cover),
-                            ))
-                            .child(
-                                div()
-                                    .font_family(theme::mono_family())
-                                    .text_size(px(9.5))
-                                    .text_color(theme::haze())
-                                    .child(format!("{}×{}", s.width, s.height)),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("drop-{id}")))
-                                    .px(px(3.))
-                                    .text_size(px(12.))
-                                    .text_color(theme::haze())
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(theme::live()))
-                                    .child("×")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.attachments.retain(|a| a.id != id);
-                                        cx.notify();
-                                    })),
-                            )
-                    }),
-                ))
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(px(8.))
-                    .px(px(theme::PAD))
-                    .pt(px(10.))
-                    .pb(px(11.))
-                    .child(div().text_color(theme::lamp()).text_size(px(14.)).line_height(px(20.)).child("›"))
-                    .child(div().flex_1().min_w_0().text_size(px(13.)).line_height(px(20.)).child(self.input.clone()))
-                    .child(div().mt(px(2.)).opacity(if self.input_focused { 1. } else { 0.45 }).child(key_badge("↩"))),
-            )
-    }
-
-    fn render_toasts(&self) -> impl IntoElement {
-        div()
-            .absolute()
-            .left(px(theme::PAD))
-            .right(px(theme::PAD))
-            .bottom(px(56.))
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .children(self.toasts.iter().map(|t| {
-                let accent = match t.kind {
-                    ToastKind::Error => theme::live(),
-                    ToastKind::Warn | ToastKind::Info => theme::lamp(),
-                };
-                div()
-                    .flex()
-                    .bg(theme::raise())
-                    .border_1()
-                    .border_color(theme::edge())
-                    .rounded(px(4.))
-                    .overflow_hidden()
-                    .child(div().flex_none().w(px(2.)).bg(accent))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px(px(11.))
-                            .py(px(8.))
-                            .text_size(px(11.5))
-                            .line_height(px(16.7))
-                            .child(t.text.clone()),
-                    )
-                    .with_animation(("toast", t.id as usize), Animation::new(Duration::from_millis(160)), |d, t| {
-                        d.opacity(t).mt(px(4. * (1. - t)))
-                    })
-            }))
-    }
-}
-
-impl Focusable for Panel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl Render for Panel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let cards: Vec<gpui::AnyElement> = {
-            let cards = self.cards.clone();
-            cards.iter().enumerate().map(|(i, c)| self.render_card(c, i == 0, cx).into_any_element()).collect()
-        };
-        let readout = div()
-            .id("readout")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.readout_scroll)
-            .p(px(theme::PAD))
-            .when(cards.is_empty(), |d| d.child(self.render_legend()))
-            .children(cards);
-
-        div()
-            .id("shell")
-            .key_context("Panel")
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::on_escape))
-            .on_action(cx.listener(Self::on_open_settings))
-            .size_full()
-            .relative()
-            .flex()
-            .flex_col()
-            .bg(theme::shell_bg())
-            .border_1()
-            .border_color(theme::hairline())
-            .rounded(px(13.))
-            .overflow_hidden()
-            .font_family(theme::ui_family())
-            .text_color(theme::read())
-            .text_size(px(13.))
-            // macOS fades the whole window natively; elsewhere the view fades.
-            .when(!cfg!(target_os = "macos"), |d| d.opacity(self.cfg.window.opacity))
-            .child(self.render_rail(cx))
-            .child(readout)
-            .child(self.render_drawer(cx))
-            .child(self.render_composer(cx))
-            .child(
-                div()
-                    .id("grip")
-                    .absolute()
-                    .right_0()
-                    .bottom_0()
-                    .size(px(15.))
-                    .cursor(gpui::CursorStyle::ResizeUpLeftDownRight)
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::grip_down))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::grip_up))
-                    .child(
-                        div()
-                            .absolute()
-                            .right(px(3.))
-                            .bottom(px(3.))
-                            .size(px(7.))
-                            .border_r_1()
-                            .border_b_1()
-                            .border_color(theme::edge()),
-                    ),
-            )
-            .on_mouse_move(cx.listener(Self::grip_move))
-            .child(self.render_toasts())
-            .when_some(self.settings.clone(), |d, settings| {
-                d.child(div().absolute().top_0().left_0().size_full().child(settings))
-            })
     }
 }
 

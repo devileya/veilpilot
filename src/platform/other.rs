@@ -22,6 +22,7 @@ pub fn displays() -> Vec<DisplayInfo> {
                 work_area: bounds,
                 scale: m.scale_factor().unwrap_or(1.0) as f64,
                 primary: m.is_primary().unwrap_or(false),
+                notch: None,
             }
         })
         .collect()
@@ -32,6 +33,8 @@ pub fn cursor_position() -> (f64, f64) {
 }
 
 pub fn set_accessory_app() {}
+
+pub fn guard_key_window_deadlock() {}
 pub fn activate_app() {}
 
 pub fn screen_permission() -> Permission {

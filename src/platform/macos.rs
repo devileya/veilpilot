@@ -36,6 +36,20 @@ unsafe impl Encode for CGPoint {
 unsafe impl Encode for CGSize {
     const ENCODING: Encoding = Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
 }
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct NSEdgeInsets {
+    top: f64,
+    left: f64,
+    bottom: f64,
+    right: f64,
+}
+
+unsafe impl Encode for NSEdgeInsets {
+    const ENCODING: Encoding =
+        Encoding::Struct("NSEdgeInsets", &[f64::ENCODING, f64::ENCODING, f64::ENCODING, f64::ENCODING]);
+}
+
 unsafe impl Encode for CGRect {
     const ENCODING: Encoding = Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
 }
@@ -133,16 +147,40 @@ pub fn displays() -> Vec<DisplayInfo> {
             let desc: Id = msg_send![screen, deviceDescription];
             let number: Id = msg_send![desc, objectForKey: key];
             let id: u32 = if number.is_null() { i as u32 } else { msg_send![number, unsignedIntValue] };
+            let bounds = to_top_left(frame, primary_h);
             out.push(DisplayInfo {
                 id: id.to_string(),
-                bounds: to_top_left(frame, primary_h),
+                bounds,
                 work_area: to_top_left(visible, primary_h),
                 scale,
                 primary: i == 0,
+                notch: notch(screen, bounds),
             });
         }
     }
     out
+}
+
+/// The notch: the gap between the two auxiliary top areas, as tall as the
+/// top safe-area inset (macOS 12+).
+fn notch(screen: Id, bounds: Rect) -> Option<Rect> {
+    unsafe {
+        let responds: Bool = msg_send![screen, respondsToSelector: objc2::sel!(auxiliaryTopLeftArea)];
+        if !responds.as_bool() {
+            return None;
+        }
+        let insets: NSEdgeInsets = msg_send![screen, safeAreaInsets];
+        if insets.top <= 0.0 {
+            return None;
+        }
+        let left: CGRect = msg_send![screen, auxiliaryTopLeftArea];
+        let right: CGRect = msg_send![screen, auxiliaryTopRightArea];
+        let width = right.origin.x - (left.origin.x + left.size.width);
+        if width <= 0.0 {
+            return None;
+        }
+        Some(Rect { x: bounds.x + left.size.width, y: bounds.y, width, height: insets.top })
+    }
 }
 
 pub fn cursor_position() -> (f64, f64) {
@@ -154,6 +192,54 @@ pub fn cursor_position() -> (f64, f64) {
         let p = CGEventGetLocation(event);
         CFRelease(event);
         (p.x, p.y)
+    }
+}
+
+/// The original `windowDidBecomeKey:` of GPUI's window classes.
+static GPUI_DID_BECOME_KEY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+unsafe extern "C-unwind" fn did_become_key(this: *mut AnyObject, sel: objc2::runtime::Sel, note: *mut AnyObject) {
+    unsafe {
+        let key: Bool = msg_send![&*this, isKeyWindow];
+        if !key.as_bool() {
+            // A spurious "became key". GPUI answers it with resignKeyWindow
+            // while holding the window's lock, and the resign notification
+            // that follows takes the same lock: a deadlock. Resign here,
+            // with no lock held, which is what GPUI meant to do.
+            let _: () = msg_send![&*this, resignKeyWindow];
+            return;
+        }
+        if let Some(&imp) = GPUI_DID_BECOME_KEY.get() {
+            let original: unsafe extern "C-unwind" fn(*mut AnyObject, objc2::runtime::Sel, *mut AnyObject) =
+                std::mem::transmute(imp);
+            original(this, sel, note);
+        }
+    }
+}
+
+/// Work around a GPUI 0.2 deadlock on spurious key-window changes (see
+/// `did_become_key`). Call once, after the first window is open: GPUI
+/// registers its window classes then.
+pub fn guard_key_window_deadlock() {
+    use objc2::ffi;
+    use objc2::runtime::{AnyClass, Sel};
+    let sel = Sel::register(c"windowDidBecomeKey:");
+    for name in [c"GPUIWindow", c"GPUIPanel"] {
+        let Some(class) = AnyClass::get(name) else { continue };
+        unsafe {
+            let method = ffi::class_getInstanceMethod(class, sel);
+            if method.is_null() {
+                continue;
+            }
+            let ours: objc2::runtime::Imp =
+                std::mem::transmute(did_become_key as unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject));
+            // Both classes share GPUI's function; keep the first original.
+            if let Some(previous) = ffi::method_setImplementation(method, ours) {
+                if previous as usize != ours as usize {
+                    let _ = GPUI_DID_BECOME_KEY.set(previous as usize);
+                }
+            }
+        }
     }
 }
 
@@ -316,6 +402,15 @@ impl NativeWindow {
     pub fn is_visible(&self) -> bool {
         let visible: Bool = unsafe { msg_send![self.0, isVisible] };
         visible.as_bool()
+    }
+
+    /// Dev: tell the window it became key when it did not, the way AppKit
+    /// sometimes does (see `guard_key_window_deadlock`).
+    pub fn spurious_become_key(&self) {
+        let nil: Id = std::ptr::null_mut();
+        unsafe {
+            let _: () = msg_send![self.0, windowDidBecomeKey: nil];
+        }
     }
 
     pub fn is_key(&self) -> bool {

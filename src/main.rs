@@ -12,9 +12,11 @@ mod audio;
 mod capture;
 mod config;
 mod dev;
+mod devcat;
 mod hotkeys;
 mod icons;
 mod instance;
+mod live;
 mod platform;
 mod runtime;
 mod secrets;
@@ -102,6 +104,7 @@ fn main() {
         let window = cx
             .open_window(options, |window, cx| cx.new(|cx| Panel::new(window, cx)))
             .expect("opening the panel window");
+        platform::guard_key_window_deadlock();
 
         let (external_tx, external_rx) = futures::channel::mpsc::unbounded::<External>();
         let panel_entity = window.update(cx, |_, _, cx| cx.entity()).expect("panel entity");

@@ -202,6 +202,9 @@ pub fn build_args(opts: &StreamOptions, cc: &ClaudeCodeOptions) -> Vec<String> {
     }
     // Claude Code owns the conversation: the first ask names a session, every
     // later ask resumes it, so only the newest turn is ever sent.
+    if cc.ephemeral {
+        args.push("--no-session-persistence".into());
+    }
     if let Some(id) = &cc.resume_id {
         args.extend(["--resume".into(), id.clone()]);
     } else if let Some(id) = &cc.session_id {
@@ -290,8 +293,15 @@ pub async fn stream(opts: &StreamOptions, tx: &ChunkSender) -> anyhow::Result<()
     let binary = resolve_binary(&cc.binary_path)?;
     let turn = opts.messages.last().context("Nothing to send.")?;
 
-    let cwd =
-        if !cc.cwd.is_empty() && Path::new(&cc.cwd).is_dir() { PathBuf::from(&cc.cwd) } else { std::env::temp_dir() };
+    // The picked project's folder, else the configured one, else a temp dir
+    // so no project is implied.
+    let cwd = if let Some(dir) = opts.cwd.as_ref().filter(|d| d.is_dir()) {
+        dir.clone()
+    } else if !cc.cwd.is_empty() && Path::new(&cc.cwd).is_dir() {
+        PathBuf::from(&cc.cwd)
+    } else {
+        std::env::temp_dir()
+    };
 
     let mut command = tokio::process::Command::new(&binary);
     command
@@ -363,6 +373,8 @@ mod tests {
             show_thinking: true,
             server_side_fallback: false,
             claude_code: None,
+            cli: None,
+            cwd: None,
         }
     }
 

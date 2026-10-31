@@ -100,6 +100,25 @@ impl Session {
         self.transcript[start..].iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")
     }
 
+    /// The whole transcript with times, for summaries and memory.
+    pub fn transcript_with_times(&self) -> String {
+        self.transcript
+            .iter()
+            .map(|l| {
+                use chrono::TimeZone as _;
+                let t = chrono::Local.timestamp_millis_opt(l.at).single().map(|t| t.format("%H:%M:%S").to_string());
+                format!("[{}] {}", t.unwrap_or_default(), l.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Forget the Claude Code session, so the next ask starts a new one
+    /// (after switching agent or project).
+    pub fn reset_claude(&mut self) {
+        self.claude = None;
+    }
+
     pub fn clear_transcript(&mut self) {
         self.transcript.clear();
     }

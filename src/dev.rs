@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::config::{Config, HotkeyId};
 use crate::hotkeys::Action;
 use crate::instance::Command;
-use crate::ui::panel::Panel;
+use crate::ui::panel::{Menu, Panel};
 use crate::ui::region;
 use crate::ui::settings::SettingsTab;
 
@@ -112,7 +112,19 @@ pub fn state(panel: &Panel, window: &Window, cx: &gpui::App) -> Value {
             "shots": c.shots.len(),
         })).collect::<Vec<_>>(),
         "transcript": panel.session.transcript_lines().iter().map(|l| l.text.clone()).collect::<Vec<_>>(),
-        "drawerOpen": panel.drawer_open,
+        "tab": panel.tab.name(),
+        "live": panel.live.items.iter().filter(|i| i.visible()).map(|i| json!({
+            "trigger": i.trigger.label(), "line": i.line, "answer": i.answer, "done": i.done, "error": i.error,
+        })).collect::<Vec<_>>(),
+        "liveUnseen": panel.live.unseen,
+        "summary": panel.last_summary,
+        "context": panel.cfg.context.project,
+        "agent": panel.cfg.chat.provider,
+        "notch": panel.cfg.window.notch(),
+        "islandVisible": panel.island_visible(),
+        "islandFrame": panel.island_native().map(|n| n.frame()).map(|f| json!({"x": f.x, "y": f.y, "width": f.width, "height": f.height})),
+        "openMenu": panel.open_menu.map(|m| format!("{m:?}")),
+        "cheatsheet": panel.cheatsheet_open,
         "toasts": panel.toasts.iter().map(|t| format!("{:?}: {}", t.kind, t.text)).collect::<Vec<_>>(),
         "settings": panel.settings.as_ref().map(|s| format!("{:?}", s.read(cx).tab())),
         "hotkeyErrors": panel.hotkey_errors.iter().map(|f| format!("{} {} ({})", f.accelerator, f.label, f.reason)).collect::<Vec<_>>(),
@@ -229,6 +241,46 @@ pub fn handle(command: Command, panel: &mut Panel, window: &mut Window, cx: &mut
             panel.show(true, window, cx);
             reply!(ok());
         }
+        #[cfg(target_os = "macos")]
+        "spurious-key" => match panel.native {
+            // Outside this update: AppKit calls back into GPUI.
+            Some(native) => {
+                cx.defer(move |_| native.spurious_become_key());
+                reply!(ok());
+            }
+            None => reply!("error: no window".into()),
+        },
+        // The header menus, by what their rows do rather than where they are.
+        "menu" => {
+            panel.open_menu = match rest.as_str() {
+                "context" => Some(Menu::Context),
+                "agent" => Some(Menu::Agent),
+                _ => None,
+            };
+            cx.notify();
+            reply!(ok());
+        }
+        "choose" => match panel.open_menu.take() {
+            Some(Menu::Context) => {
+                panel.set_context(&rest, window, cx);
+                reply!(ok());
+            }
+            Some(Menu::Agent) => {
+                panel.set_agent(&rest, window, cx);
+                reply!(ok());
+            }
+            None => reply!("error: no menu open".into()),
+        },
+        "agents" => reply!(
+            Value::Array(
+                panel
+                    .agent_choices()
+                    .into_iter()
+                    .map(|c| json!({"id": c.id, "label": c.label, "group": c.group, "unavailable": c.unavailable}))
+                    .collect()
+            )
+            .to_string()
+        ),
         "state" => reply!(state(panel, window, cx).to_string()),
         "config" => reply!(serde_json::to_string(&panel.cfg).unwrap_or_default()),
         "set-config" => match serde_json::from_str::<Value>(&rest) {
@@ -280,11 +332,15 @@ pub fn handle(command: Command, panel: &mut Panel, window: &mut Window, cx: &mut
             })
             .detach();
         }
-        "snapshot" | "screenshot" | "snapshot-region" => {
+        "snapshot" | "screenshot" | "snapshot-region" | "snapshot-island" => {
             // A protected window is invisible to every capture, ours included,
             // so protection is lifted for the capture and restored after.
             let own = verb != "screenshot";
-            let target = if verb == "snapshot-region" { region::native(cx) } else { panel.native };
+            let target = match verb {
+                "snapshot-region" => region::native(cx),
+                "snapshot-island" => panel.island_native(),
+                _ => panel.native,
+            };
             let Some(target) = target else { return reply!("error: no such window".into()) };
             // AppKit's sharingType getter is unreliable on recent macOS, so the
             // state comes from what was set: the picker is always protected.
@@ -413,7 +469,7 @@ pub fn handle(command: Command, panel: &mut Panel, window: &mut Window, cx: &mut
             cx.spawn(async move |_, cx| {
                 for _ in 0..1200 {
                     let busy = panel_entity
-                        .update(cx, |p, _| p.is_streaming() || p.uploading > 0 || p.capturing > 0)
+                        .update(cx, |p, _| p.is_streaming() || p.live.busy() || p.uploading > 0 || p.capturing > 0)
                         .unwrap_or(false);
                     if !busy {
                         break;

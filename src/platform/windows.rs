@@ -45,6 +45,7 @@ unsafe extern "system" fn collect(monitor: HMONITOR, _: HDC, _: *mut RECT, data:
             work_area: rect_to_points(info.rcWork, scale),
             scale,
             primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+            notch: None,
         });
     }
     BOOL(1)
@@ -76,6 +77,8 @@ pub fn cursor_position() -> (f64, f64) {
 }
 
 pub fn set_accessory_app() {}
+
+pub fn guard_key_window_deadlock() {}
 
 pub fn activate_app() {}
 
