@@ -309,6 +309,8 @@ def run(app, base, mock_dir, data):
     check("missing key is an error card", card["error"] == "No API key for OpenAI. Open settings › Keys and paste one.")
 
     print("window")
+    check("the panel is hidden from screen capture", app.send("capture-as-is", "panel").startswith("error")
+          or "coverage=0.000" in app.send("capture-as-is", "panel"))
     app.send("action", "ToggleProtection")
     check("protection toggles off", not app.state()["protection"])
     app.send("action", "ToggleProtection")
@@ -576,6 +578,16 @@ def notch_mode(app):
     s = app.state()
     check("notch mode swaps the panel for the island", s["notch"] and s["islandVisible"] and not s["visible"], s)
     collapsed = s["islandFrame"]
+    # Capturing our own window needs no permission, and macOS blanks a
+    # protected one even then — so this is what a screen share sees.
+    hidden = lambda out: out.startswith("error") or "coverage=0.000" in out
+    check("the island is hidden from screen capture", hidden(app.send("capture-as-is", "island")))
+    app.send("action", "ToggleProtection")
+    time.sleep(0.4)
+    check("turning invisible off shows the island to capture", not hidden(app.send("capture-as-is", "island")))
+    app.send("action", "ToggleProtection")
+    time.sleep(0.4)
+    check("and turning it back on hides it again", hidden(app.send("capture-as-is", "island")))
     app.set_config({"live": {"autoAnswer": True}})
     app.send("transcript", "Bagaimana kalau kita tunda ke minggu depan?")
     app.idle()

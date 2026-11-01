@@ -515,7 +515,8 @@ impl Panel {
 
     pub fn set_protection(&mut self, on: bool, cx: &mut Context<Self>) {
         self.cfg.window.protection = on;
-        if let Some(native) = self.native {
+        // Every window of ours: the panel and, in notch mode, the island.
+        for native in [self.native, self.island_native()].into_iter().flatten() {
             native.set_content_protection(on);
         }
         self.save_config();
@@ -543,6 +544,9 @@ impl Panel {
             self.reapply_hotkeys(window, cx);
         }
         if before.window != self.cfg.window {
+            if let Some(island) = self.island_native() {
+                island.set_content_protection(self.cfg.window.protection);
+            }
             if let Some(native) = self.native {
                 native.set_content_protection(self.cfg.window.protection);
                 native.set_opacity(self.cfg.window.opacity);

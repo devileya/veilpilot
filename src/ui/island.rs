@@ -180,6 +180,8 @@ impl Island {
                     // Above the panel and the menu bar, on every Space.
                     native.configure_overlay(2, false);
                     native.make_borderless();
+                    // Again after the style change, before it is ever on screen.
+                    native.set_content_protection(protection);
                     native.set_frame(frame);
                     native.show(false);
                 });
@@ -456,8 +458,10 @@ impl Panel {
             // that has to wait until this update of the panel is over.
             self.island_opening = true;
             let panel = cx.entity();
-            let (panel_window, protection) = (self.window_handle, self.cfg.window.protection);
+            let panel_window = self.window_handle;
             cx.defer(move |cx| {
+                // Read now, not when scheduled: protection may have changed.
+                let protection = panel.read(cx).cfg.window.protection;
                 let handle = Island::open(panel.clone(), panel_window, protection, cx);
                 let native = handle.and_then(|h| h.update(cx, |island, _, _| island.native()).ok().flatten());
                 panel.update(cx, |this, cx| {

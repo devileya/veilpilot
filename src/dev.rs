@@ -317,6 +317,28 @@ pub fn handle(command: Command, panel: &mut Panel, window: &mut Window, cx: &mut
             panel.run_action(Action::Prompt(rest), window, cx);
             reply!(ok());
         }
+        "capture-as-is" => {
+            // Our own window captured with protection left as it is. Capturing
+            // your own windows needs no permission, and macOS blanks a
+            // protected one even then: an error or an empty image means
+            // screen recorders cannot see it either.
+            let target = match rest.as_str() {
+                "island" => panel.island_native(),
+                _ => panel.native,
+            };
+            let path = std::env::temp_dir().join(format!("vp-capture-{}.png", uuid::Uuid::new_v4()));
+            cx.spawn_in(window, async move |_, cx| {
+                cx.background_executor().timer(Duration::from_millis(300)).await;
+                let text = match target.map(|t| snapshot(t, &path.display().to_string(), true)) {
+                    Some(Ok(size)) => format!("ok {size}"),
+                    Some(Err(err)) => format!("error: {err:#}"),
+                    None => "error: no window".into(),
+                };
+                let _ = std::fs::remove_file(&path);
+                let _ = tx.send(text);
+            })
+            .detach();
+        }
         "screenshot-raw" => {
             // The display as any screen recorder sees it, protection untouched.
             let target = panel.native;

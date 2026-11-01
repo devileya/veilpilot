@@ -298,7 +298,7 @@ that hugs the MacBook notch (on a display without one, and on Windows, a pill at
 of the screen). Its wings show recording, ⚡ / @ modes, unseen answers and protection. A new
 answer — live or asked — drops down from it and folds back 12 seconds after it finishes;
 hovering keeps it open, a click opens the full chat. `⌘⇧\` hides and shows the island.
-It is capture-protected like the panel.
+It is hidden from screen share like the panel, and follows the same invisible toggle.
 
 ### Speech to text runs on your machine by default
 
