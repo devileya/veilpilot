@@ -79,6 +79,8 @@ impl NativeWindow {
     pub fn frame(&self) -> Rect {
         Rect::default()
     }
+    pub fn set_min_size(&self, _width: f64, _height: f64) {}
+
     pub fn set_frame(&self, _rect: Rect) {}
     pub fn begin_drag(&self) {}
     pub fn make_borderless(&self) {}

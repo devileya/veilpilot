@@ -423,6 +423,14 @@ impl NativeWindow {
         to_top_left(frame, primary_screen_height())
     }
 
+    /// The smallest size the user can drag the window to (GPUI sets it once,
+    /// at open; the minimized bar needs less).
+    pub fn set_min_size(&self, width: f64, height: f64) {
+        unsafe {
+            let _: () = msg_send![self.0, setContentMinSize: CGSize { width, height }];
+        }
+    }
+
     pub fn set_frame(&self, rect: Rect) {
         let frame = from_top_left(rect, primary_screen_height());
         unsafe {

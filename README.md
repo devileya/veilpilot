@@ -33,7 +33,10 @@ behind the Zed editor. No Electron, no web view: the macOS app is a single 16 MB
 
 Three tabs: **Chat** (your asks), **Live** (answers VeilPilot gave by itself while
 listening), and **Transcript** (with Summarize and Save to memory). The strip of hotkeys
-under them never goes away, and `?` opens every key at once. In **notch mode** the panel
+under them never goes away, and `?` opens every key at once. **▭** switches to a compact
+layout (one header row, smaller type, one row of keys); **—** folds the panel to its title
+bar, which still shows recording, unseen live answers and a restore button — any ask opens
+it back up. In **notch mode** the panel
 gives way to a black island around the MacBook notch that drops answers down and folds
 back up.
 
@@ -87,6 +90,12 @@ reads `visible` when it is off.
 Linux x64. The macOS app is not notarized — open it the first time with right-click ›
 Open. On Linux there is no capture protection (the panel shows in screen shares) and no
 tray icon.
+
+**Updates:** VeilPilot checks GitHub for a newer release once a day (Settings › About,
+where you can also check now). The header shows **↑ update** when there is one. On macOS
+**Install and restart** downloads it, replaces the app in place and starts the new version;
+macOS may ask for Screen Recording and Microphone again afterwards, because each build is
+signed anew. On Windows and Linux the download opens in your browser.
 
 Every push to `main` is built on all three by GitHub Actions
 (`.github/workflows/build.yml`); pushing a tag `vX.Y.Z` that matches `Cargo.toml`
@@ -263,9 +272,16 @@ VeilPilot reads DevCat's projects and its shared agent memory. The
 **◇ context menu** at the top of the panel picks one:
 
 - **No context** (the default) — the agent knows only this chat, and nothing is saved.
-- **A DevCat project** — its memories (newest first, within a budget) are added to the
-  system prompt, agents run in the project's folder, and **Save to memory** is allowed.
-  Settings › AI can keep the project but leave its memory out.
+- **A DevCat project** — its memories go into the system prompt, agents run in the
+  project's folder, and **Save to memory** is allowed. Settings › AI can keep the project
+  but leave its memory out.
+
+The memories are DevCat's shared memory for the project plus **Claude Code's own memory**
+for the project's code folders (`~/.claude/projects/<folder>/memory`) that DevCat has not
+imported yet. A DevCat project with no code folder linked is matched to the Claude Code
+folder of the same name — so a project called "interopera" picks up the memory Claude Code
+keeps for `~/Projects/Interopera`. The memories that share the most words with what is
+being asked go first, whole, then one line for each of the rest, within 16 KB.
 
 **Summarize** (`⌘⇧Y`, or the button on the Transcript tab) asks the agent for a summary of
 the whole transcript with the prompt in Settings › Voice. **Save to memory** (`⌘⇧U`)
@@ -389,7 +405,8 @@ src/
   transcribe.rs      routes audio to the local engine or a cloud endpoint
   whisper.rs         on-device speech to text: detect, model download, run
   live.rs            live answers: question and name detection, the live prompt
-  devcat.rs          DevCat projects, memory (read, brief, save via `devcat mcp`), connections
+  devcat.rs          DevCat projects, memory (DevCat's and Claude Code's; brief, save via `devcat mcp`), connections
+  update.rs          the update check against GitHub releases, and the in-place install on macOS
   ai/                provider adapters + streaming with cancellation
     openai.rs          OpenAI-compatible /chat/completions
     anthropic.rs       Anthropic Messages API (SSE)
@@ -404,6 +421,7 @@ src/
       view.rs            header, menus, tabs, hotkey strip, cheatsheet, ask box
       agents.rs          the agent and context menus, system prompt, agent options
       live.rs            live answers, summarize, save to memory
+      updates.rs         checking for and installing a new version
     island.rs          notch mode: the island window
     settings.rs        Settings › AI / Voice / Capture / Prompts / Keys
     region.rs          the drag-to-select overlay

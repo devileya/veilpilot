@@ -47,10 +47,10 @@ def free_port():
 
 
 class App:
-    def __init__(self, data_dir, devcat_dir):
+    def __init__(self, data_dir, devcat_dir, extra_env=None):
         # DEVCAT_TEST_MEMORY_SECRETS keeps `devcat mcp` off the keychain.
         self.env = dict(os.environ, VEILPILOT_DATA_DIR=str(data_dir), VEILPILOT_DEVCAT_DIR=str(devcat_dir),
-                        DEVCAT_TEST_MEMORY_SECRETS="1")
+                        DEVCAT_TEST_MEMORY_SECRETS="1", **(extra_env or {}))
         self.proc = None
 
     def start(self):
@@ -133,7 +133,11 @@ def main():
     mock = subprocess.Popen([sys.executable, str(ROOT / "tests/mock_llm.py"), str(port)], cwd=mock_dir)
     devcat = data / "devcat"
     make_devcat(devcat, data / "repo")
-    app = App(data, devcat)
+    make_claude_memory(data / "claude", data / "work" / "Misc")
+    # The update check asks the mock instead of GitHub; no check at launch.
+    (data / "config.json").write_text(json.dumps({"updates": {"check": False}}))
+    app = App(data, devcat, {"VEILPILOT_CLAUDE_DIR": str(data / "claude"),
+                             "VEILPILOT_UPDATE_URL": f"{base}/repos/x/releases/latest"})
     try:
         app.start()
         run(app, base, mock_dir, data)
@@ -162,6 +166,19 @@ def make_devcat(devcat, repo):
         "---\nname: release-day\ndescription: Shop releases ship on Fridays after QA signs off\n"
         "metadata:\n  type: project\n  origin: claude-code\n  updated: 2026-10-30T12:00:00Z\n---\n\n"
         "Releases go out Friday afternoon once QA signs off in #qa.\n")
+
+
+def make_claude_memory(claude, repo):
+    """Claude Code's own memory for a repository named like the "Misc" DevCat
+    project, which links no folder — as interopera does."""
+    repo.mkdir(parents=True)
+    folder = claude / "projects" / "".join(c if c.isascii() and c.isalnum() else "-" for c in str(repo))
+    (folder / "memory").mkdir(parents=True)
+    (folder / "memory" / "MEMORY.md").write_text("# Memory Index\n- [Staging](staging.md)\n")
+    (folder / "memory" / "staging.md").write_text(
+        "---\nname: staging-branch\ndescription: Misc work branches off origin/staging\nmetadata:\n"
+        "  type: feedback\n---\n\nAlways branch Misc work off origin/staging, never main.\n")
+    (folder / "session.jsonl").write_text(json.dumps({"cwd": str(repo)}) + "\n")
 
 
 def script(path, body):
@@ -331,6 +348,33 @@ def run(app, base, mock_dir, data):
     check("moved position is saved", saved and saved["x"] == x0 - 48, saved)
     app.send("action", "MoveRight")
 
+    print("compact and minimized")
+    app.send("compact", "on")
+    check("compact layout is saved", app.config()["window"]["compact"])
+    app.send("compact", "off")
+    height = app.state()["frame"]["height"]
+    app.send("minimize")
+    time.sleep(0.6)
+    s = app.state()
+    check("minimize folds the panel to its title bar", s["minimized"] and s["frame"]["height"] == 40, s["frame"])
+    time.sleep(0.8)
+    check("the real size is what gets saved", json.loads((data / "config.json").read_text())["window"]["bounds"]["height"]
+          == height)
+    app.send("action", "Send")
+    time.sleep(0.6)
+    s = app.state()
+    check("asking opens it back up", not s["minimized"] and s["frame"]["height"] == height, s["frame"])
+
+    print("updates")
+    app.send("update-check")
+    for _ in range(50):
+        if app.state()["update"]["available"]:
+            break
+        time.sleep(0.1)
+    update = app.state()["update"]
+    check("a newer release is found", update["available"] and update["available"]["version"] == "9.9.9"
+          and update["available"]["asset"].startswith("VeilPilot-9.9.9-"), update)
+
     print("global hotkeys (Carbon event path)")
     app.send("press", "Command+Shift+\\")
     time.sleep(0.3)
@@ -480,6 +524,17 @@ echo '{{"type":"item.completed","item":{{"id":"i1","type":"agent_message","text"
     app.send("choose", "custom")
     check("an API provider keeps its model and URL", app.config()["chat"]["baseUrl"] == f"{base}/v1"
           and app.config()["chat"]["model"] == "mock-model", app.config()["chat"])
+
+    app.send("menu", "context")
+    app.send("choose", "misc")
+    check("Claude Code memory counts for a project named like its folder",
+          "Misc — 1 memory available" in app.state()["toasts"][-1], app.state()["toasts"][-1])
+    app.ask("which branch for the deploy work?")
+    system = requests(mock_dir)[-1]["body"]["messages"][0]["content"]
+    check("Claude Code's memory reaches the model", "Always branch Misc work off origin/staging" in system
+          and "Memory Index" not in system, system[-300:])
+    app.send("menu", "context")
+    app.send("choose", "shop")
 
     print("summary and memory")
     app.send("action", "NewSession")

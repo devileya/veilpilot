@@ -4,6 +4,7 @@
 
 mod agents;
 mod live;
+mod updates;
 mod view;
 
 pub use live::LiveState;
@@ -45,6 +46,8 @@ pub fn bind_keys(cx: &mut App) {
 
 pub const DEFAULT_SIZE: (f64, f64) = (430.0, 580.0);
 pub const MIN_SIZE: (f64, f64) = (320.0, 240.0);
+/// Height of the minimized panel: the title bar alone.
+pub const MINI_HEIGHT: f64 = 40.0;
 const MARGIN: f64 = 24.0;
 
 /* ---------- small state types ---------- */
@@ -185,6 +188,11 @@ pub struct Panel {
     /// The summary that "Save to memory" waited for has arrived.
     pending_save: bool,
     pub open_menu: Option<Menu>,
+    /// Memories per DevCat project, counted when the context menu opens.
+    pub memory_counts: std::collections::HashMap<String, usize>,
+    /// Minimized to the title bar; holds the height to restore.
+    pub minimized: Option<f64>,
+    pub update: updates::UpdateState,
     pub cheatsheet_open: bool,
     pub transcript_unseen: usize,
     pub latest: Option<Latest>,
@@ -277,6 +285,9 @@ impl Panel {
             devcat_keys: Default::default(),
             island: None,
             island_native_cache: None,
+            update: Default::default(),
+            minimized: None,
+            memory_counts: Default::default(),
             island_opening: false,
             window_handle: window.window_handle(),
             transcript_scroll: ScrollHandle::new(),
@@ -335,6 +346,8 @@ impl Panel {
         if self.cfg.transcription.provider == "local" {
             crate::whisper::warm(&self.cfg.transcription.whisper_cpp);
         }
+
+        self.schedule_update_check(cx);
 
         if cfg!(target_os = "macos") && capture::screen_permission() != Permission::Granted {
             self.toast(
@@ -428,8 +441,9 @@ impl Panel {
                     return;
                 }
                 let f = native.frame();
-                this.cfg.window.bounds =
-                    Some(config::WindowBounds { x: f.x, y: f.y, width: f.width, height: f.height });
+                // Minimized, the window is only its title bar: keep the real height.
+                let height = this.minimized.unwrap_or(f.height);
+                this.cfg.window.bounds = Some(config::WindowBounds { x: f.x, y: f.y, width: f.width, height });
                 this.save_config();
             });
         }));
@@ -510,6 +524,41 @@ impl Panel {
         }
         self.save_config();
         self.refresh_tray();
+        cx.notify();
+    }
+
+    /// Fold the panel up to its title bar, or open it back to its size.
+    pub fn set_minimized(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.minimized.is_some() {
+            return;
+        }
+        let Some(native) = self.native else { return };
+        let f = native.frame();
+        if on {
+            self.minimized = Some(f.height);
+            self.open_menu = None;
+            self.cheatsheet_open = false;
+            self.with_native(cx, move |n| {
+                n.set_min_size(MIN_SIZE.0, MINI_HEIGHT);
+                n.set_frame(Rect { height: MINI_HEIGHT, ..f });
+            });
+        } else {
+            let height = self.minimized.take().unwrap_or(MIN_SIZE.1).max(MIN_SIZE.1);
+            if self.tab == Tab::Live {
+                self.live.unseen = 0;
+            }
+            self.with_native(cx, move |n| {
+                let f = n.frame();
+                n.set_frame(Rect { height, ..f });
+                n.set_min_size(MIN_SIZE.0, MIN_SIZE.1);
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_compact(&mut self, cx: &mut Context<Self>) {
+        self.cfg.window.compact = !self.cfg.window.compact;
+        self.save_config();
         cx.notify();
     }
 
@@ -651,6 +700,7 @@ impl Panel {
     /* ---------- actions ---------- */
 
     pub fn focus_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_minimized(false, cx);
         self.show(true, window, cx);
         self.close_settings(window, cx);
         self.input.update(cx, |input, cx| {
@@ -929,6 +979,8 @@ impl Panel {
         self.close_settings(window, cx);
         self.open_menu = None;
         self.tab = Tab::Chat;
+        // You asked: the answer needs room.
+        self.set_minimized(false, cx);
         // Shots sent with this ask are consumed, so a follow-up question
         // does not upload them a second time.
         self.attachments.retain(|a| !shots.iter().any(|s| s.id == a.id));

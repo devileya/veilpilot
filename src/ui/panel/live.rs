@@ -164,7 +164,11 @@ impl Panel {
             // The ask box is focused nearly always; only a half-typed
             // question keeps you where you are.
             let typing = !self.input.read(cx).text().is_empty();
-            if self.tab != Tab::Live {
+            if self.minimized.is_some() {
+                // The title bar counts it; the Live tab is open on restore.
+                self.tab = Tab::Live;
+                self.live.unseen += 1;
+            } else if self.tab != Tab::Live {
                 if !typing && self.settings.is_none() && !self.is_streaming() {
                     self.tab = Tab::Live;
                 } else {

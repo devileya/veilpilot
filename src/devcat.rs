@@ -76,6 +76,9 @@ pub fn project(id: &str) -> Option<Project> {
 pub enum Scope {
     Global,
     Project,
+    /// Claude Code's own memory for one of the project's folders, not (yet)
+    /// imported into DevCat's shared memory.
+    Claude,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -144,9 +147,18 @@ fn read_place(dir: &Path, scope: Scope) -> Vec<Memory> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "md"))
+        // Claude Code's index of its memory files, not a memory.
+        .filter(|p| p.file_name().is_none_or(|n| n != "MEMORY.md"))
         .filter_map(|p| {
             let stem = p.file_stem()?.to_string_lossy().to_string();
-            std::fs::read_to_string(&p).ok().map(|t| parse(&t, &stem, scope))
+            let mut m = parse(&std::fs::read_to_string(&p).ok()?, &stem, scope);
+            if m.updated.is_empty() {
+                // Claude Code does not stamp its memories; the file time will do.
+                if let Ok(t) = p.metadata().and_then(|m| m.modified()) {
+                    m.updated = chrono::DateTime::<chrono::Utc>::from(t).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                }
+            }
+            Some(m)
         })
         .collect()
 }
@@ -155,16 +167,138 @@ fn project_dir(project_id: &str) -> PathBuf {
     data_dir().join("memory").join("projects").join(project_id)
 }
 
-/// The project's memories and the global ones, newest first.
-pub fn memories(project_id: &str) -> Vec<Memory> {
-    let mut list = read_place(&project_dir(project_id), Scope::Project);
+/* ---------- Claude Code's own memory ---------- */
+
+/// Where Claude Code keeps a folder per working directory.
+fn claude_projects_root() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("VEILPILOT_CLAUDE_DIR") {
+        return Some(PathBuf::from(dir).join("projects"));
+    }
+    let base = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))?;
+    Some(base.join("projects"))
+}
+
+/// Claude Code's name for a working directory's folder (DevCat's `encode_cwd`).
+fn encode_cwd(path: &str) -> String {
+    path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// The Claude Code folders that belong to a project: those of its code
+/// folders (and folders inside them). A project with no code folder gets the
+/// folders whose directory has the project's name — DevCat projects are often
+/// made without linking the repository.
+pub fn claude_dirs(project: &Project) -> Vec<PathBuf> {
+    let Some(root) = claude_projects_root() else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&root) else { return Vec::new() };
+    let names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().join("memory").is_dir())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    let prefixes: Vec<String> = if project.folders.is_empty() {
+        let tail = format!("-{}", encode_cwd(project.name.trim())).to_lowercase();
+        if tail.len() < 2 {
+            return Vec::new();
+        }
+        names.iter().filter(|n| n.to_lowercase().ends_with(&tail)).cloned().collect()
+    } else {
+        project.folders.iter().map(|f| encode_cwd(f.trim_end_matches(['/', '\\']))).collect()
+    };
+    let mut out: Vec<PathBuf> = names
+        .iter()
+        .filter(|n| prefixes.iter().any(|p| *n == p || n.starts_with(&format!("{p}-"))))
+        .map(|n| root.join(n))
+        .collect();
+    out.sort();
+    out
+}
+
+/// The working directory Claude Code recorded for one of its folders (its
+/// session logs say), to run agents in when the project names no folder.
+fn claude_cwd(dir: &Path) -> Option<PathBuf> {
+    static CWD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""cwd"\s*:\s*"((?:[^"\\]|\\.)*)""#).unwrap());
+    let logs = std::fs::read_dir(dir).ok()?;
+    for log in logs.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "jsonl")).take(5) {
+        let Ok(file) = std::fs::File::open(&log) else { continue };
+        use std::io::BufRead as _;
+        for line in std::io::BufReader::new(file).lines().take(50).map_while(Result::ok) {
+            if let Some(c) = CWD.captures(&line) {
+                let path: String = serde_json::from_str(&format!("\"{}\"", &c[1])).unwrap_or_default();
+                let path = PathBuf::from(path);
+                // Only the folder itself, not a subfolder an agent wandered into.
+                if path.is_dir() && encode_cwd(&path.to_string_lossy()) == dir.file_name()?.to_string_lossy() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Where agents run for this project: its first code folder, else the folder
+/// Claude Code worked in under the project's name.
+pub fn project_folder(project: &Project) -> Option<PathBuf> {
+    project.folder().or_else(|| {
+        if !project.folders.is_empty() {
+            return None;
+        }
+        // The shortest name is the repository itself, not a folder inside it.
+        let mut dirs = claude_dirs(project);
+        dirs.sort_by_key(|d| d.as_os_str().len());
+        dirs.iter().find_map(|d| claude_cwd(d))
+    })
+}
+
+/// The project's memories, its Claude Code memories and the global ones,
+/// newest first. A Claude Code memory DevCat already imported (same name)
+/// is not repeated.
+pub fn memories(project: &Project) -> Vec<Memory> {
+    let mut list = read_place(&project_dir(&project.id), Scope::Project);
+    let known: std::collections::HashSet<String> = list.iter().map(|m| slug(&m.name)).collect();
+    for dir in claude_dirs(project) {
+        list.extend(
+            read_place(&dir.join("memory"), Scope::Claude).into_iter().filter(|m| !known.contains(&slug(&m.name))),
+        );
+    }
     list.extend(read_place(&data_dir().join("memory").join("global"), Scope::Global));
     list.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.name.cmp(&b.name)));
     list
 }
 
-/// What the agent is told about the project: its name and as many memories
-/// as fit in `budget` bytes, newest first; the rest are listed by name.
+/// Put the memories that share words with `query` (what is being asked)
+/// first, most in common first; the rest keep their order (newest first).
+/// A word in a memory's name or description counts more than one in its body.
+pub fn rank(memories: &mut [Memory], query: &str) {
+    let words: std::collections::HashSet<String> =
+        query.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 4).map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return;
+    }
+    let score = |m: &Memory| -> usize {
+        let head = format!("{} {}", m.name, m.description).to_lowercase();
+        let body = m.body.to_lowercase();
+        words
+            .iter()
+            .map(|w| {
+                if head.contains(w.as_str()) {
+                    3
+                } else if body.contains(w.as_str()) {
+                    1
+                } else {
+                    0
+                }
+            })
+            .sum()
+    };
+    // sort_by_cached_key is stable: equal scores stay newest first.
+    memories.sort_by_cached_key(|m| std::cmp::Reverse(score(m)));
+}
+
+/// What the agent is told about the project: its name, as many whole
+/// memories as fit in about half of `budget` bytes (newest first), then one
+/// line for each of the rest while they fit, then how many were left out.
 pub fn brief(project: &Project, memories: &[Memory], budget: usize) -> String {
     let mut out = format!("Project context: \"{}\" (from DevCat).", project.name);
     if let Some(d) = project.description.as_deref().filter(|d| !d.trim().is_empty()) {
@@ -174,21 +308,35 @@ pub fn brief(project: &Project, memories: &[Memory], budget: usize) -> String {
         return out;
     }
     out.push_str("\nWhat is known about it (shared agent memory; trust it unless the conversation contradicts it):");
-    let mut skipped = Vec::new();
+    let whole_budget = out.len() + budget / 2;
+    let mut rest = Vec::new();
     for m in memories {
         // The type ("project", "feedback", ...) is the useful part; a
         // global memory also says so.
         let tag = if m.scope == Scope::Global { format!("{}, global", m.kind) } else { m.kind.clone() };
         let entry = format!("\n\n## {} ({tag})\n{}\n{}", m.name, m.description, m.body);
-        if out.len() + entry.len() <= budget {
+        if rest.is_empty() && out.len() + entry.len() <= whole_budget {
             out.push_str(&entry);
         } else {
-            skipped.push(format!("{} — {}", m.name, m.description));
+            rest.push(m);
         }
     }
-    if !skipped.is_empty() {
-        out.push_str("\n\nAlso in memory (titles only): ");
-        out.push_str(&skipped.join("; "));
+    if rest.is_empty() {
+        return out;
+    }
+    out.push_str("\n\nAlso in memory (one line each):");
+    let mut left = rest.len();
+    for m in &rest {
+        let about = if m.description.is_empty() { m.body.lines().next().unwrap_or("") } else { &m.description };
+        let line = format!("\n- {}: {}", m.name, about.chars().take(160).collect::<String>());
+        if out.len() + line.len() + 40 > budget {
+            break;
+        }
+        out.push_str(&line);
+        left -= 1;
+    }
+    if left > 0 {
+        out.push_str(&format!("\n…and {left} more."));
     }
     out
 }
@@ -507,8 +655,81 @@ mod tests {
             .collect();
         let b = brief(&p, &mems, 1000);
         assert!(b.starts_with("Project context: \"Shop\""));
-        assert!(b.len() <= 1200, "{}", b.len());
-        assert!(b.contains("Also in memory (titles only)"));
+        assert!(b.len() <= 1000, "{}", b.len());
+        assert!(b.contains("## m0 (project)") && b.contains("Also in memory (one line each):\n- m"), "{b}");
+        // Hundreds of memories stay within the budget too.
+        let many: Vec<Memory> = (0..300).map(|i| Memory { name: format!("memory-{i}"), ..mems[0].clone() }).collect();
+        let b = brief(&p, &many, 4000);
+        assert!(b.len() <= 4000 && b.contains("more."), "{}", b.len());
+    }
+
+    #[test]
+    fn ranks_memories_by_the_question() {
+        let mem = |name: &str, description: &str, body: &str| Memory {
+            name: name.into(),
+            description: description.into(),
+            kind: "project".into(),
+            body: body.into(),
+            origin: String::new(),
+            updated: String::new(),
+            scope: Scope::Project,
+        };
+        let mut list = vec![
+            mem("newest", "unrelated", "nothing here"),
+            mem("pr-polling", "how to poll reviews", "mentions deploy once"),
+            mem("deploy-friday", "Releases deploy on Friday", "after QA"),
+            mem("older", "also unrelated", ""),
+        ];
+        rank(&mut list, "When do we deploy the release?");
+        let names: Vec<&str> = list.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["deploy-friday", "pr-polling", "newest", "older"]);
+    }
+
+    #[test]
+    fn finds_claude_code_memory_by_folder_or_by_name() {
+        let root = std::env::temp_dir().join(format!("vp-claude-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("work").join("Interopera");
+        std::fs::create_dir_all(&repo).unwrap();
+        let encoded = encode_cwd(&repo.to_string_lossy());
+        let dir = root.join("projects").join(&encoded);
+        std::fs::create_dir_all(dir.join("memory")).unwrap();
+        std::fs::write(dir.join("memory/MEMORY.md"), "# Memory Index\n").unwrap();
+        std::fs::write(
+            dir.join("memory/feedback_x.md"),
+            "---\nname: autonomous-execution\ndescription: act without asking\nmetadata:\n  type: feedback\n---\n\nBody.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("s.jsonl"),
+            format!("{{\"cwd\":{}}}\n", serde_json::to_string(&repo.to_string_lossy()).unwrap()),
+        )
+        .unwrap();
+        // SAFETY: tests touching this variable run in this one test only.
+        unsafe { std::env::set_var("VEILPILOT_CLAUDE_DIR", &root) };
+
+        let by_name = Project { id: "x".into(), name: "interopera".into(), ..Default::default() };
+        assert_eq!(claude_dirs(&by_name), vec![dir.clone()]);
+        let mems = memories(&by_name);
+        let m = mems.iter().find(|m| m.scope == Scope::Claude).expect("the Claude memory");
+        assert_eq!(
+            (m.name.as_str(), m.kind.as_str(), m.description.as_str()),
+            ("autonomous-execution", "feedback", "act without asking")
+        );
+        assert!(!m.updated.is_empty(), "file time stands in for the stamp");
+        assert!(mems.iter().all(|m| m.name != "MEMORY"), "the index is not a memory");
+        assert_eq!(project_folder(&by_name), Some(repo.clone()), "agents run where Claude Code worked");
+
+        let linked = Project {
+            id: "y".into(),
+            name: "other".into(),
+            folders: vec![repo.to_string_lossy().into()],
+            ..Default::default()
+        };
+        assert_eq!(claude_dirs(&linked), vec![dir.clone()]);
+        let unrelated = Project { id: "z".into(), name: "opera".into(), ..Default::default() };
+        assert!(claude_dirs(&unrelated).is_empty(), "a name must match the whole folder name");
+        unsafe { std::env::remove_var("VEILPILOT_CLAUDE_DIR") };
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -526,7 +747,7 @@ mod tests {
         )
         .unwrap();
         assert!(path.ends_with("meeting-2026-11-01.md"));
-        let got = memories("proj-1");
+        let got = memories(&Project { id: "proj-1".into(), ..Default::default() });
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].description, "Standup: release Friday");
         assert_eq!(got[0].origin, "veilpilot");

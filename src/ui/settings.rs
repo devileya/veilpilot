@@ -27,11 +27,18 @@ pub enum SettingsTab {
     Shots,
     Prompts,
     Keys,
+    About,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 5] =
-        [SettingsTab::Ai, SettingsTab::Voice, SettingsTab::Shots, SettingsTab::Prompts, SettingsTab::Keys];
+    const ALL: [SettingsTab; 6] = [
+        SettingsTab::Ai,
+        SettingsTab::Voice,
+        SettingsTab::Shots,
+        SettingsTab::Prompts,
+        SettingsTab::Keys,
+        SettingsTab::About,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -40,6 +47,7 @@ impl SettingsTab {
             SettingsTab::Shots => "Capture",
             SettingsTab::Prompts => "Prompts",
             SettingsTab::Keys => "Keys",
+            SettingsTab::About => "About",
         }
     }
 
@@ -50,6 +58,7 @@ impl SettingsTab {
             "shots" | "capture" => SettingsTab::Shots,
             "prompts" => SettingsTab::Prompts,
             "keys" => SettingsTab::Keys,
+            "about" => SettingsTab::About,
             _ => return None,
         })
     }
@@ -936,7 +945,7 @@ impl SettingsView {
         out.push(
             field(
                 "Project memory",
-                checkbox("use-memory", use_memory, "Give the agent the picked project's DevCat memory", {
+                checkbox("use-memory", use_memory, "Give the agent the picked project's memory (DevCat and Claude Code)", {
                     let me = me.clone();
                     move |on, window, cx| {
                         let _ = me.update(cx, |this, cx| this.set(window, cx, false, |c| c.context.use_memory = on));
@@ -1458,6 +1467,25 @@ impl SettingsView {
             )
             .into_any_element(),
         );
+        out.push(
+            field(
+                "Layout",
+                checkbox("compact", win.compact, "Compact: one header row, smaller type, one row of keys", {
+                    let me = me.clone();
+                    move |_, window, cx| {
+                        let _ = me.update(cx, |this, cx| {
+                            this.with_panel(window, cx, |panel, _, cx| panel.toggle_compact(cx));
+                            cx.notify();
+                        });
+                    }
+                }),
+                Some(
+                    hint("Also the ▭ / ▤ button in the panel's header; — folds the panel to its title bar.")
+                        .into_any_element(),
+                ),
+            )
+            .into_any_element(),
+        );
         let opacity = self.input("window.opacity", &win.opacity.to_string(), "1", FieldKind::Number, window, cx);
         out.push(field("Opacity", input_box(opacity), None).into_any_element());
         let toggle = |id: &'static str, value: bool, label: &'static str, apply: fn(&mut Config, bool)| {
@@ -1629,6 +1657,82 @@ impl SettingsView {
         out
     }
 
+    fn view_about(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let me = cx.entity().downgrade();
+        let Some(panel) = self.panel.upgrade() else { return Vec::new() };
+        let state = &panel.read(cx).update;
+        let (checking, installing, available, status) =
+            (state.checking, state.installing, state.available.clone(), state.status.clone());
+        let mut out = vec![section("VeilPilot", true).into_any_element()];
+        out.push(
+            field(
+                "Version",
+                div().text_size(px(13.)).child(crate::update::current_version()),
+                Some(hint(format!("Releases: **github.com/{}/releases**", crate::update::REPO)).into_any_element()),
+            )
+            .into_any_element(),
+        );
+        out.push(section("Updates", false).into_any_element());
+        let mut actions = div().flex().flex_wrap().gap(px(8.)).child(button(
+            "check-updates",
+            if checking { "Checking…" } else { "Check for updates" },
+            false,
+            {
+                let me = me.clone();
+                move |_, window, cx| {
+                    let _ = me.update(cx, |this, cx| {
+                        this.with_panel(window, cx, |panel, _, cx| panel.check_for_updates(true, cx))
+                    });
+                }
+            },
+        ));
+        if let Some(release) = &available {
+            let label = if installing {
+                format!("Installing {}…", release.version)
+            } else if crate::update::can_install() {
+                format!("Install {} and restart", release.version)
+            } else {
+                format!("Download {}", release.version)
+            };
+            actions = actions
+                .child(button("install-update", label, false, {
+                    let me = me.clone();
+                    move |_, window, cx| {
+                        let _ = me.update(cx, |this, cx| {
+                            this.with_panel(window, cx, |panel, _, cx| panel.install_update(cx))
+                        });
+                    }
+                }))
+                .child(button("release-notes", "What's new", false, {
+                    let page = release.page.clone();
+                    move |_, _, _| crate::platform::open_external(&page)
+                }));
+        }
+        out.push(actions.into_any_element());
+        if let Some(status) = status {
+            out.push(hint(status).mt(px(8.)).into_any_element());
+        }
+        if available.is_some() && crate::update::can_install() {
+            out.push(
+                hint("The new version replaces this app and starts by itself. macOS may ask for Screen Recording and Microphone again, because each build is signed anew.")
+                    .mt(px(6.))
+                    .into_any_element(),
+            );
+        }
+        out.push(
+            div()
+                .mt(px(12.))
+                .child(checkbox("auto-update-check", snap.cfg.updates.check, "Check for a new version once a day", {
+                    let me = me.clone();
+                    move |on, window, cx| {
+                        let _ = me.update(cx, |this, cx| this.set(window, cx, false, |c| c.updates.check = on));
+                    }
+                }))
+                .into_any_element(),
+        );
+        out
+    }
+
     fn view_keys(&mut self, snap: &Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out = vec![
             section("API keys", true).into_any_element(),
@@ -1762,6 +1866,7 @@ impl Render for SettingsView {
             SettingsTab::Shots => self.view_shots(&snap, window, cx),
             SettingsTab::Prompts => self.view_prompts(&snap, window, cx),
             SettingsTab::Keys => self.view_keys(&snap, window, cx),
+            SettingsTab::About => self.view_about(&snap, cx),
         };
         let current = self.tab;
         let panel = self.panel.clone();

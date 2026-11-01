@@ -186,6 +186,8 @@ impl NativeWindow {
         rect_to_points(r, self.scale())
     }
 
+    pub fn set_min_size(&self, _width: f64, _height: f64) {}
+
     pub fn set_frame(&self, rect: Rect) {
         let s = self.scale();
         unsafe {

@@ -90,6 +90,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def do_GET(self):
+        # GitHub's "latest release", for the update check.
+        if self.path.endswith("/releases/latest"):
+            data = json.dumps({
+                "tag_name": "v9.9.9", "html_url": "https://example.com/releases/v9.9.9",
+                "draft": False, "prerelease": False,
+                "assets": [{"name": f"VeilPilot-9.9.9-{suffix}", "browser_download_url": f"https://example.com/{suffix}",
+                            "size": 1} for suffix in ["macos-universal.dmg", "windows-x64.zip", "linux-x64.tar.gz"]],
+            }).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.error_json(404, f"no route {self.path}")
+
     def do_POST(self):
         length = int(self.headers.get("content-length", 0))
         raw = self.rfile.read(length)

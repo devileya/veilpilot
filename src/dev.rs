@@ -99,6 +99,14 @@ pub fn state(panel: &Panel, window: &Window, cx: &gpui::App) -> Value {
         "clickThrough": panel.cfg.window.click_through,
         "opacity": panel.cfg.window.opacity,
         "frame": frame.map(|f| json!({"x": f.x, "y": f.y, "width": f.width, "height": f.height})),
+        "minimized": panel.minimized.is_some(),
+        "update": json!({
+            "checking": panel.update.checking,
+            "installing": panel.update.installing,
+            "available": panel.update.available.as_ref().map(|r| json!({"version": r.version, "asset": r.asset.as_ref().map(|a| a.name.clone())})),
+            "status": panel.update.status,
+        }),
+        "compact": panel.cfg.window.compact,
         "streaming": panel.is_streaming(),
         "recording": panel.is_recording(),
         "uploading": panel.uploading,
@@ -250,13 +258,32 @@ pub fn handle(command: Command, panel: &mut Panel, window: &mut Window, cx: &mut
             }
             None => reply!("error: no window".into()),
         },
+        "update-check" => {
+            panel.check_for_updates(true, cx);
+            reply!(ok());
+        }
+        "update-install" => {
+            panel.install_update(cx);
+            reply!(ok());
+        }
+        // The header's minimize and layout buttons.
+        "minimize" => {
+            panel.set_minimized(rest != "off", cx);
+            reply!(ok());
+        }
+        "compact" => {
+            if panel.cfg.window.compact != (rest != "off") {
+                panel.toggle_compact(cx);
+            }
+            reply!(ok());
+        }
         // The header menus, by what their rows do rather than where they are.
         "menu" => {
-            panel.open_menu = match rest.as_str() {
-                "context" => Some(Menu::Context),
-                "agent" => Some(Menu::Agent),
-                _ => None,
-            };
+            match rest.as_str() {
+                "context" => panel.open_context_menu(),
+                "agent" => panel.open_menu = Some(Menu::Agent),
+                _ => panel.open_menu = None,
+            }
             cx.notify();
             reply!(ok());
         }

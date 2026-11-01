@@ -24,6 +24,7 @@ mod session;
 mod transcribe;
 mod tray;
 mod ui;
+mod update;
 mod whisper;
 
 use futures::StreamExt as _;

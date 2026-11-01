@@ -435,6 +435,22 @@ impl Default for ContextConfig {
     }
 }
 
+/// Checking GitHub for a newer release.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UpdatesConfig {
+    /// Look once a day, shortly after launch.
+    pub check: bool,
+    /// When it last looked (RFC 3339), '' for never.
+    pub last_check: String,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self { check: true, last_check: String::new() }
+    }
+}
+
 pub const SUMMARY_PROMPT: &str = "Ringkas transkrip percakapan berikut dalam bahasa yang dipakai di transkrip. \
 Mulai dengan satu kalimat inti, lalu poin-poin: topik utama, keputusan, dan tindak lanjut \
 (siapa, apa, kapan). Jangan mengarang hal yang tidak ada di transkrip.\n\n{{transcript}}";
@@ -483,6 +499,8 @@ pub struct WindowConfig {
     pub protection: bool,
     pub click_through: bool,
     pub show_on_start: bool,
+    /// The compact layout: one header row, smaller type, one row of keys.
+    pub compact: bool,
 }
 
 impl Default for WindowConfig {
@@ -494,6 +512,7 @@ impl Default for WindowConfig {
             protection: true,
             click_through: false,
             show_on_start: true,
+            compact: false,
         }
     }
 }
@@ -835,6 +854,7 @@ pub struct Config {
     pub window: WindowConfig,
     pub context: ContextConfig,
     pub live: LiveConfig,
+    pub updates: UpdatesConfig,
     pub prompts: Vec<PromptPreset>,
     pub hotkeys: HotkeyConfig,
 }
@@ -849,6 +869,7 @@ impl Default for Config {
             window: WindowConfig::default(),
             context: ContextConfig::default(),
             live: LiveConfig::default(),
+            updates: UpdatesConfig::default(),
             prompts: default_prompts(),
             hotkeys: HotkeyConfig::default(),
         }
@@ -944,6 +965,7 @@ fn from_value_lenient(value: serde_json::Value) -> Config {
     section!("window", window);
     section!("context", context);
     section!("live", live);
+    section!("updates", updates);
     section!("prompts", prompts);
     section!("hotkeys", hotkeys);
     cfg

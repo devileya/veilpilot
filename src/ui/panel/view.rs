@@ -15,6 +15,7 @@ use crate::config::{HotkeyId, PromptSource, provider_by_id};
 use crate::devcat;
 use crate::hotkeys::pretty;
 use crate::ui::markdown;
+use crate::ui::settings::SettingsTab;
 use crate::ui::theme;
 use crate::ui::widgets::{caps, chrome_button, key_badge, swallow_mouse_down};
 
@@ -72,6 +73,21 @@ fn chip(id: &'static str, label: &str, color: gpui::Rgba, on: bool) -> gpui::Sta
     )
 }
 
+/// A one-glyph mode toggle for the compact header (the chips' short form).
+fn glyph(id: &'static str, text: &'static str, color: gpui::Rgba, on: bool) -> gpui::Stateful<gpui::Div> {
+    swallow_mouse_down(
+        div()
+            .id(id)
+            .flex_none()
+            .px(px(2.))
+            .text_size(px(11.))
+            .text_color(if on { color } else { gpui::Rgba { a: 0.35, ..theme::haze() } })
+            .cursor_pointer()
+            .hover(|s| s.text_color(theme::read()))
+            .child(text),
+    )
+}
+
 /// One row of a dropdown menu.
 fn menu_row(
     id: SharedString,
@@ -111,6 +127,7 @@ impl Panel {
     /* ---------- header ---------- */
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = self.cfg.window.compact;
         let streaming = self.is_streaming() || self.live.busy();
         let project = self.context_project();
         let context_label = project.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "No context".into());
@@ -156,7 +173,9 @@ impl Panel {
                 }),
             )
             .child(img(ImageSource::Render(self.mark.clone())).flex_none().size(px(11.)))
-            .child(div().flex_none().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child("VeilPilot"))
+            .when(!compact, |d| {
+                d.child(div().flex_none().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child("VeilPilot"))
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -165,8 +184,11 @@ impl Panel {
                     .child(
                         picker("context-picker", context_icon, context_label, menu_open == Some(Menu::Context))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.open_menu =
-                                    if this.open_menu == Some(Menu::Context) { None } else { Some(Menu::Context) };
+                                if this.open_menu == Some(Menu::Context) {
+                                    this.open_menu = None;
+                                } else {
+                                    this.open_context_menu();
+                                }
                                 cx.notify();
                             })),
                     )
@@ -186,6 +208,54 @@ impl Panel {
                     )
                     .when(menu_open == Some(Menu::Agent), |d| d.child(self.render_agent_menu(cx))),
             )
+            .when(compact, |d| {
+                // The second row's chips, as glyphs.
+                let live = &self.cfg.live;
+                d.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(3.))
+                        .child(
+                            glyph(
+                                "veil-glyph",
+                                "●",
+                                if self.cfg.window.protection { theme::lamp() } else { theme::live() },
+                                true,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_protection(cx))),
+                        )
+                        .child(
+                            glyph(
+                                "rec-glyph",
+                                if self.is_recording() { "◉" } else { "○" },
+                                theme::live(),
+                                self.is_recording(),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| this.record_toggle(window, cx))),
+                        )
+                        .child(
+                            glyph("auto-glyph", "⚡", theme::lamp(), live.auto_answer)
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_auto_answer(cx))),
+                        )
+                        .child(
+                            glyph("name-glyph", "@", theme::lamp(), live.answer_on_name)
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_answer_on_name(cx))),
+                        )
+                        .when(self.update.available.is_some(), |d| {
+                            d.child(glyph("update-glyph", "↑", theme::lamp(), true).on_click(cx.listener(
+                                |this, _, window, cx| this.open_settings(Some(SettingsTab::About), window, cx),
+                            )))
+                        }),
+                )
+            })
+            .child(chrome_button(
+                "layout",
+                if compact { "▤" } else { "▭" },
+                cx.listener(|this, _, _, cx| this.toggle_compact(cx)),
+            ))
+            .child(chrome_button("minimize", "—", cx.listener(|this, _, _, cx| this.set_minimized(true, cx))))
             .child(chrome_button("gear", "⚙", cx.listener(|this, _, window, cx| this.open_settings(None, window, cx))));
 
         let protection = self.cfg.window.protection;
@@ -245,9 +315,85 @@ impl Panel {
             .child(
                 chip("notch-chip", "◒ notch", theme::lamp(), self.cfg.window.notch())
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_notch(window, cx))),
-            );
+            )
+            .when_some(self.update.available.as_ref(), |d, release| {
+                d.child(chip("update-chip", &format!("↑ update {}", release.version), theme::lamp(), true).on_click(
+                    cx.listener(|this, _, window, cx| this.open_settings(Some(SettingsTab::About), window, cx)),
+                ))
+            });
 
-        div().relative().flex_none().flex().flex_col().child(row1).child(row2).child(seam)
+        div().relative().flex_none().flex().flex_col().child(row1).when(!compact, |d| d.child(row2)).child(seam)
+    }
+
+    /// Minimized: the title bar alone, with what is going on and a way back.
+    fn render_mini(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let unseen = self.live.unseen;
+        let status = if self.is_recording() {
+            Some(("● rec", theme::live()))
+        } else if self.is_streaming() || self.live.busy() {
+            Some(("answering…", theme::lamp()))
+        } else if self.uploading > 0 {
+            Some(("transcribing…", theme::lamp()))
+        } else {
+            None
+        };
+        div()
+            .id("mini")
+            // A fixed height at the top: GPUI may still lay the window out at
+            // its old size for a frame.
+            .w_full()
+            .h(px(super::MINI_HEIGHT as f32))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .pl(px(theme::PAD))
+            .pr(px(10.))
+            .bg(theme::shell_bg())
+            .border_1()
+            .border_color(theme::hairline())
+            .rounded(px(13.))
+            .overflow_hidden()
+            .font_family(theme::ui_family())
+            .text_color(theme::read())
+            .text_size(px(11.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.with_native(cx, |native| native.begin_drag());
+                    this.queue_save_bounds(cx);
+                }),
+            )
+            .child(img(ImageSource::Render(self.mark.clone())).flex_none().size(px(11.)))
+            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).child("VeilPilot"))
+            .when_some(status, |d, (text, color)| d.child(div().flex_none().text_color(color).child(text)))
+            .when(unseen > 0, |d| {
+                d.child(
+                    swallow_mouse_down(
+                        div()
+                            .id("mini-unseen")
+                            .px(px(6.))
+                            .rounded(px(8.))
+                            .bg(theme::lamp())
+                            .text_color(theme::void())
+                            .text_size(px(9.5))
+                            .font_weight(FontWeight::BOLD)
+                            .cursor_pointer()
+                            .child(format!("{unseen} new")),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_minimized(false, cx);
+                        this.set_tab(Tab::Live, cx);
+                    })),
+                )
+            })
+            .child(div().flex_1())
+            .child(div().flex_none().size(px(6.)).rounded_full().bg(if self.cfg.window.protection {
+                theme::lamp()
+            } else {
+                theme::live()
+            }))
+            .child(chrome_button("restore", "▢", cx.listener(|this, _, _, cx| this.set_minimized(false, cx))))
     }
 
     fn menu_box(id: &'static str) -> gpui::Stateful<gpui::Div> {
@@ -296,7 +442,7 @@ impl Panel {
             rows.push(menu_heading("DevCat projects"));
             for p in projects {
                 let id = p.id.clone();
-                let count = devcat::memories(&p.id).iter().filter(|m| m.scope == devcat::Scope::Project).count();
+                let count = self.memory_counts.get(&p.id).copied().unwrap_or(0);
                 rows.push(
                     menu_row(
                         SharedString::from(format!("ctx-{}", p.id)),
@@ -358,6 +504,7 @@ impl Panel {
     /* ---------- tabs ---------- */
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = self.cfg.window.compact;
         let lines = self.session.transcript_lines().len();
         div()
             .flex_none()
@@ -389,9 +536,9 @@ impl Panel {
                         .flex()
                         .items_center()
                         .gap(px(5.))
-                        .px(px(8.))
-                        .pt(px(6.))
-                        .pb(px(5.))
+                        .px(px(if compact { 6. } else { 8. }))
+                        .pt(px(if compact { 3. } else { 6. }))
+                        .pb(px(if compact { 2. } else { 5. }))
                         .border_b_2()
                         .border_color(if on { theme::lamp() } else { gpui::Rgba { a: 0.0, ..theme::lamp() } })
                         .text_color(if on { theme::read() } else { theme::haze() })
@@ -442,7 +589,7 @@ impl Panel {
             )
             .child(div().text_size(px(11.5)).line_height(px(17.)).child(match project {
                 Some(p) => format!(
-                    "Context: {} — the agent gets its DevCat memory, and Save to memory files the meeting there.",
+                    "Context: {} — the agent gets its memory (DevCat's, and Claude Code's for its folders), and Save to memory files the meeting there.",
                     p.name
                 ),
                 None => "No context: the agent knows only this chat. Pick a DevCat project at the top to give it project memory.".into(),
@@ -553,8 +700,8 @@ impl Panel {
                     .flex_col()
                     .gap(px(9.5))
                     .max_w(px(62. * 7.2))
-                    .text_size(px(13.5))
-                    .line_height(px(21.9))
+                    .text_size(px(if self.cfg.window.compact { 12.5 } else { 13.5 }))
+                    .line_height(px(if self.cfg.window.compact { 19.5 } else { 21.9 }))
                     .text_color(theme::read())
                     .children(body),
             )
@@ -834,16 +981,24 @@ impl Panel {
             .py(px(6.))
             .border_t_1()
             .border_color(theme::edge())
-            .child(div().flex_1().min_w_0().flex().flex_wrap().gap(px(4.)).max_h(px(66.)).overflow_hidden().children(
-                self.strip_keys().into_iter().map(|(key, label)| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(3.))
-                        .child(key_badge(pretty(&key)))
-                        .child(div().text_size(px(10.)).text_color(theme::haze()).pr(px(3.)).child(label))
-                }),
-            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(4.))
+                    .max_h(px(if self.cfg.window.compact { 21. } else { 66. }))
+                    .overflow_hidden()
+                    .children(self.strip_keys().into_iter().map(|(key, label)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(3.))
+                            .child(key_badge(pretty(&key)))
+                            .child(div().text_size(px(10.)).text_color(theme::haze()).pr(px(3.)).child(label))
+                    })),
+            )
             .child(swallow_mouse_down(
                 div()
                     .id("cheatsheet-toggle")
@@ -1052,6 +1207,9 @@ impl Focusable for Panel {
 
 impl Render for Panel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.minimized.is_some() {
+            return self.render_mini(cx).into_any_element();
+        }
         let body = match self.tab {
             Tab::Chat => self.render_chat(cx),
             Tab::Live => self.render_live(cx),
@@ -1120,5 +1278,6 @@ impl Render for Panel {
             .when_some(self.settings.clone(), |d, settings| {
                 d.child(div().absolute().top_0().left_0().size_full().child(settings))
             })
+            .into_any_element()
     }
 }

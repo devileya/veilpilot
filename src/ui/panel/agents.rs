@@ -14,7 +14,7 @@ use crate::session::Turn;
 
 /// Memory given to the agent, in bytes. Enough for a few dozen entries
 /// without crowding out the question.
-const MEMORY_BUDGET: usize = 8 * 1024;
+const MEMORY_BUDGET: usize = 16 * 1024;
 
 /// One entry in the header's agent menu.
 #[derive(Clone, Debug)]
@@ -77,11 +77,13 @@ impl Panel {
         devcat::project(&self.cfg.context.project)
     }
 
-    /// The system prompt, plus the picked project's memory.
-    pub(super) fn system_prompt(&self) -> String {
+    /// The system prompt, plus the picked project's memory, the memories that
+    /// bear on `query` (what is being asked) first.
+    pub(super) fn system_prompt(&self, query: &str) -> String {
         let base = self.cfg.chat.system_prompt.clone();
         let Some(project) = self.context_project() else { return base };
-        let memories = if self.cfg.context.use_memory { devcat::memories(&project.id) } else { Vec::new() };
+        let mut memories = if self.cfg.context.use_memory { devcat::memories(&project) } else { Vec::new() };
+        devcat::rank(&mut memories, query);
         format!("{base}\n\n{}", devcat::brief(&project, &memories, MEMORY_BUDGET))
     }
 
@@ -93,7 +95,12 @@ impl Panel {
         messages: Vec<Turn>,
         effort: Option<String>,
     ) -> StreamOptions {
-        let cwd: Option<PathBuf> = self.context_project().and_then(|p| p.folder());
+        let cwd: Option<PathBuf> = self.context_project().and_then(|p| devcat::project_folder(&p));
+        // The newest turn: the question, with the transcript when a prompt uses it.
+        let query: String = messages
+            .last()
+            .map(|t| t.text.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect())
+            .unwrap_or_default();
         let cli = match provider.kind {
             ProviderKind::AgentCli(kind) => Some(CliOptions {
                 binary_path: self.cfg.chat.agents.paths.get(kind.id()).cloned().unwrap_or_default(),
@@ -106,7 +113,7 @@ impl Panel {
             base_url: provider.base_url.clone(),
             api_key: provider.api_key.clone(),
             model,
-            system: self.system_prompt(),
+            system: self.system_prompt(&query),
             messages,
             max_tokens: if self.cfg.chat.max_tokens == 0 { 8192 } else { self.cfg.chat.max_tokens },
             effort: matches!(provider.kind, ProviderKind::Anthropic | ProviderKind::ClaudeCode)
@@ -202,6 +209,16 @@ impl Panel {
         self.toast(super::ToastKind::Info, format!("Answering with {label}."), cx);
     }
 
+    /// Open the context menu, counting each project's memories (DevCat's
+    /// and Claude Code's) once rather than on every repaint.
+    pub fn open_context_menu(&mut self) {
+        self.memory_counts = devcat::projects()
+            .iter()
+            .map(|p| (p.id.clone(), devcat::memories(p).iter().filter(|m| m.scope != devcat::Scope::Global).count()))
+            .collect();
+        self.open_menu = Some(super::Menu::Context);
+    }
+
     /// Pick a DevCat project, or none (`""`).
     pub fn set_context(&mut self, project_id: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let id = project_id.to_string();
@@ -210,7 +227,7 @@ impl Panel {
         self.session.reset_claude();
         match self.context_project() {
             Some(p) => {
-                let n = devcat::memories(&p.id).len();
+                let n = devcat::memories(&p).len();
                 let count = if n == 1 { "1 memory".to_string() } else { format!("{n} memories") };
                 self.toast(super::ToastKind::Info, format!("Context: {} — {count} available.", p.name), cx);
             }
