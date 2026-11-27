@@ -21,6 +21,7 @@ mod platform;
 mod runtime;
 mod secrets;
 mod session;
+mod snap;
 mod transcribe;
 mod tray;
 mod ui;
@@ -80,7 +81,7 @@ fn main() {
         }
     };
 
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(ui::assets::Assets).run(move |cx: &mut App| {
         platform::set_accessory_app();
         ui::bind_keys(cx);
 
@@ -125,10 +126,10 @@ fn main() {
                     while let Some(command) = commands.next().await {
                         let weak = weak.clone();
                         let alive = cx.update(|window, cx| {
-                            if let Some(command) = dev::handle_input(command, window, cx) {
-                                if let Some(panel) = weak.upgrade() {
-                                    panel.update(cx, |panel, cx| dev::handle(command, panel, window, cx));
-                                }
+                            if let Some(command) = dev::handle_input(command, window, cx)
+                                && let Some(panel) = weak.upgrade()
+                            {
+                                panel.update(cx, |panel, cx| dev::handle(command, panel, window, cx));
                             }
                         });
                         if alive.is_err() {

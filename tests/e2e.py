@@ -395,19 +395,21 @@ def run(app, base, mock_dir, data):
     time.sleep(0.5)
     app.send("click", "215", "175")  # first prompt's hotkey box
     time.sleep(0.3)
-    app.send("key", "cmd-shift-9")
+    app.send("key", "cmd-shift-g")
     time.sleep(0.3)
-    check("hotkey box captures a new combination", app.config()["prompts"][0]["accelerator"] == "Command+Shift+9")
+    check("hotkey box captures a new combination", app.config()["prompts"][0]["accelerator"] == "Command+Shift+G")
     app.send("settings", "close")
     time.sleep(0.3)
-    app.send("press", "Command+Shift+9")
+    app.send("press", "Command+Shift+G")
     time.sleep(0.3)
     app.idle()
     check("the new hotkey fires its prompt", any(c["label"] == "Jelaskan" for c in app.state()["cards"]))
 
     app.send("settings", "keys")
     time.sleep(0.5)
-    app.send("click", "250", "127")  # OpenAI key field
+    app.send("settings-scroll", "99999")  # API keys are below the hotkeys
+    time.sleep(0.4)
+    app.send("click", "250", "134")  # OpenAI key field
     time.sleep(0.2)
     app.send("type", "sk-e2e-key")
     app.send("key", "enter")
@@ -416,6 +418,7 @@ def run(app, base, mock_dir, data):
     check("key never lands in config.json", "sk-e2e-key" not in (data / "config.json").read_text())
     app.send("settings", "close")
 
+    screenshot_tool(app, data)
     agents_and_memory(app, base, mock_dir, data)
     live_answers(app, base, mock_dir, data)
     notch_mode(app)
@@ -459,6 +462,99 @@ def run(app, base, mock_dir, data):
         check("Claude Code gives a live answer", bool(live) and live[-1]["done"] and ("4" in answer or "four" in answer),
               live)
         app.set_config({"live": {"autoAnswer": False}})
+
+
+def wait_for(app, test, tries=60):
+    for _ in range(tries):
+        s = app.state()
+        if test(s):
+            return s
+        time.sleep(0.1)
+    return app.state()
+
+
+def screenshot_tool(app, data):
+    print("screenshot tool")
+    cfg = app.config()
+    check("prompt hotkeys are letters", all(p["accelerator"].rsplit("+", 1)[-1].isalpha() for p in cfg["prompts"]),
+          [p["accelerator"] for p in cfg["prompts"]])
+    hk = cfg["hotkeys"]
+    check("the number row is the screenshot tool's, as in Shottr",
+          hk["snapFullscreen"] == "Command+Shift+1" and hk["snapArea"] == "Command+Shift+2"
+          and hk["snapOcr"] == "Command+Control+Alt+O", hk)
+
+    shots = data / "shots"
+    app.set_config({"snap": {"folder": str(shots), "showEditor": True, "copyAfter": False, "saveAfter": False}})
+    editor = lambda s: s["snap"]["editor"]
+
+    app.send("action", "SnapArea")
+    s = wait_for(app, lambda s: s["regionOpen"])
+    check("the area key opens the picker", s["regionOpen"])
+    app.send("region", "20", "20", "300", "180")
+    s = wait_for(app, lambda s: s["snap"]["editorOpen"] and editor(s))
+    e = editor(s) or {}
+    check("the area opens in the editor", s["snap"]["editorOpen"] and e.get("width", 0) >= 300
+          and abs(e["width"] / e["height"] - 300 / 180) < 0.05, e)
+    size = (e.get("width"), e.get("height"))
+
+    app.send("editor", "tool", "R")
+    app.send("editor", "drag", "20", "20", "160", "120")
+    app.send("editor", "tool", "A")
+    app.send("editor", "drag", "200", "200", "60", "60")
+    e = editor(app.state())
+    check("tools draw annotations", e["annotations"] == ["Rect", "Arrow"], e)
+    app.send("editor", "undo")
+    check("undo takes the last one back", editor(app.state())["annotations"] == ["Rect"])
+    app.send("editor", "tool", "T")
+    app.send("editor", "drag", "40", "300", "40", "300")
+    app.send("editor", "type", "VEILPILOT 2026")
+    app.send("editor", "key", "enter")
+    check("the text tool makes a label", editor(app.state())["annotations"] == ["Rect", "Text"])
+
+    app.send("editor", "key", "cmd-s")
+    s = wait_for(app, lambda s: (editor(s) or {}).get("note", "") and "Saved" in editor(s)["note"])
+    files = sorted(shots.glob("*.png"))
+    check("⌘S saves into the screenshots folder", len(files) == 1, editor(s))
+
+    app.send("editor", "select", "10", "10", "100", "60")
+    app.send("editor", "key", "enter")
+    e = editor(app.state())
+    check("Enter crops to the selected area", (e["width"], e["height"]) == (100, 60), e)
+    app.send("editor", "undo")
+    check("and undo brings the whole picture back", (editor(app.state())["width"], editor(app.state())["height"]) == size)
+
+    if files and sys.platform == "darwin":
+        app.send("snap-open", str(files[0]))
+        app.send("editor", "ocr")
+        s = wait_for(app, lambda s: (editor(s) or {}).get("note") and "Copied" in editor(s)["note"], 100)
+        clip = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+        check("text recognition copies what the picture says", "VEILPILOT" in clip.upper() and "2026" in clip,
+              (editor(s) or {}).get("note"))
+
+    attached = len(app.state()["attachments"])
+    app.send("editor", "ask")
+    s = wait_for(app, lambda s: len(s["attachments"]) > attached)
+    check("Ask sends the picture to the panel", len(s["attachments"]) == attached + 1)
+    app.send("action", "Send")
+    app.send("key", "escape")
+
+    app.send("editor", "key", "escape")
+    s = wait_for(app, lambda s: not s["snap"]["editorOpen"])
+    check("Esc closes the editor", not s["snap"]["editorOpen"])
+
+    app.send("action", "SnapRepeatArea")
+    s = wait_for(app, lambda s: s["snap"]["editorOpen"] and editor(s))
+    check("repeat area captures the same area without asking",
+          not s["regionOpen"] and (editor(s) or {}).get("width") == size[0], editor(s))
+    app.send("editor", "close")
+
+    app.set_config({"snap": {"showEditor": False, "saveAfter": True}})
+    app.send("action", "SnapFullscreen")
+    wait_for(app, lambda s: len(list(shots.glob("*.png"))) > 1)
+    s = app.state()
+    check("with the editor off, fullscreen saves straight away",
+          len(list(shots.glob("*.png"))) == 2 and not s["snap"]["editorOpen"], s["toasts"][-2:])
+    app.set_config({"snap": {"showEditor": True, "saveAfter": False}})
 
 
 def agents_and_memory(app, base, mock_dir, data):

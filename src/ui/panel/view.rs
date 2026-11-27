@@ -14,10 +14,11 @@ use super::{Card, CardKind, Menu, Panel, Tab, ToastKind, stamp};
 use crate::config::{HotkeyId, PromptSource, provider_by_id};
 use crate::devcat;
 use crate::hotkeys::pretty;
+use crate::ui::assets::icon;
 use crate::ui::markdown;
 use crate::ui::settings::SettingsTab;
 use crate::ui::theme;
-use crate::ui::widgets::{caps, chrome_button, key_badge, swallow_mouse_down};
+use crate::ui::widgets::{caps, chrome_button, icon_button, key_badge, swallow_mouse_down, tooltip};
 
 /// A pill button in the header (the context and agent pickers).
 fn picker(id: &'static str, icon: &str, label: String, open: bool) -> gpui::Stateful<gpui::Div> {
@@ -29,18 +30,18 @@ fn picker(id: &'static str, icon: &str, label: String, open: bool) -> gpui::Stat
             .gap(px(5.))
             .min_w_0()
             .max_w(px(150.))
-            .px(px(7.))
-            .py(px(3.))
-            .rounded(px(5.))
+            .px(px(9.))
+            .py(px(4.))
+            .rounded(px(theme::RADIUS))
             .border_1()
-            .border_color(if open { theme::lamp() } else { theme::edge() })
-            .bg(theme::glass())
-            .text_size(px(11.))
+            .border_color(if open { theme::lamp_border() } else { theme::hairline() })
+            .bg(if open { theme::control_hover() } else { theme::control() })
+            .text_size(px(11.5))
             .cursor_pointer()
-            .hover(|s| s.border_color(theme::lamp()))
+            .hover(|s| s.bg(theme::control_hover()))
             .child(div().flex_none().text_color(theme::lamp()).child(icon.to_string()))
             .child(div().min_w_0().truncate().child(label))
-            .child(div().flex_none().text_size(px(8.)).text_color(theme::haze()).child("▾")),
+            .child(crate::ui::assets::icon("chevron-down").size(px(11.)).text_color(theme::haze())),
     )
 }
 
@@ -60,15 +61,15 @@ fn chip(id: &'static str, label: &str, color: gpui::Rgba, on: bool) -> gpui::Sta
             .flex()
             .items_center()
             .gap(px(5.))
-            .px(px(6.))
-            .py(px(2.))
-            .rounded(px(10.))
+            .px(px(8.))
+            .py(px(3.))
+            .rounded_full()
             .border_1()
-            .border_color(if on { gpui::Rgba { a: 0.45, ..color } } else { theme::edge() })
-            .bg(if on { gpui::Rgba { a: 0.10, ..color } } else { gpui::Rgba { a: 0.0, ..color } })
+            .border_color(if on { gpui::Rgba { a: 0.35, ..color } } else { theme::hairline() })
+            .bg(if on { gpui::Rgba { a: 0.12, ..color } } else { theme::control() })
             .text_color(if on { color } else { theme::haze() })
             .cursor_pointer()
-            .hover(|s| s.border_color(theme::read()))
+            .hover(|s| s.bg(theme::control_hover()))
             .child(caps(label)),
     )
 }
@@ -102,7 +103,8 @@ fn menu_row(
         .items_center()
         .gap(px(8.))
         .px(px(10.))
-        .py(px(5.))
+        .py(px(6.))
+        .rounded(px(6.))
         .text_size(px(12.))
         .text_color(if selected {
             theme::lamp()
@@ -111,7 +113,7 @@ fn menu_row(
         } else {
             theme::read()
         })
-        .when(!disabled, |d| d.cursor_pointer().hover(|s| s.bg(theme::glass())))
+        .when(!disabled, |d| d.cursor_pointer().hover(|s| s.bg(theme::control_hover())))
         .child(div().flex_1().min_w_0().truncate().child(label))
         .when_some(detail, |d, detail| {
             d.child(div().flex_none().text_size(px(10.)).text_color(theme::haze()).child(detail))
@@ -250,13 +252,39 @@ impl Panel {
                         }),
                 )
             })
-            .child(chrome_button(
-                "layout",
-                if compact { "▤" } else { "▭" },
-                cx.listener(|this, _, _, cx| this.toggle_compact(cx)),
-            ))
-            .child(chrome_button("minimize", "—", cx.listener(|this, _, _, cx| this.set_minimized(true, cx))))
-            .child(chrome_button("gear", "⚙", cx.listener(|this, _, window, cx| this.open_settings(None, window, cx))));
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .child(
+                        icon_button(
+                            "layout",
+                            if compact { "rows" } else { "maximize" },
+                            false,
+                            cx.listener(|this, _, _, cx| this.toggle_compact(cx)),
+                        )
+                        .tooltip(tooltip(if compact { "Full layout" } else { "Compact layout" }, None::<&str>)),
+                    )
+                    .child(
+                        icon_button(
+                            "minimize",
+                            "minimize",
+                            false,
+                            cx.listener(|this, _, _, cx| this.set_minimized(true, cx)),
+                        )
+                        .tooltip(tooltip("Fold to the title bar", None::<&str>)),
+                    )
+                    .child(
+                        icon_button(
+                            "gear",
+                            "settings",
+                            false,
+                            cx.listener(|this, _, window, cx| this.open_settings(None, window, cx)),
+                        )
+                        .tooltip(tooltip("Settings", Some(if cfg!(target_os = "macos") { "⌘," } else { "Ctrl+," }))),
+                    ),
+            );
 
         let protection = self.cfg.window.protection;
         let (rec_label, rec_color, rec_on) = if self.is_recording() {
@@ -393,7 +421,10 @@ impl Panel {
             } else {
                 theme::live()
             }))
-            .child(chrome_button("restore", "▢", cx.listener(|this, _, _, cx| this.set_minimized(false, cx))))
+            .child(
+                icon_button("restore", "maximize", false, cx.listener(|this, _, _, cx| this.set_minimized(false, cx)))
+                    .tooltip(tooltip("Restore", None::<&str>)),
+            )
     }
 
     fn menu_box(id: &'static str) -> gpui::Stateful<gpui::Div> {
@@ -406,9 +437,9 @@ impl Panel {
             .overflow_y_scroll()
             .bg(theme::raise())
             .border_1()
-            .border_color(theme::lamp())
-            .rounded(px(6.))
-            .py(px(4.))
+            .border_color(theme::edge())
+            .rounded(px(theme::RADIUS_LG))
+            .p(px(4.))
             .shadow_lg()
     }
 
@@ -576,7 +607,13 @@ impl Panel {
             .flex_col()
             .gap(px(10.))
             .text_color(theme::haze())
-            .child(div().text_size(px(13.)).text_color(theme::read()).child("Ask anything, or press a key below."))
+            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::read()).child("Ask anything, or press a key below."))
+            .child(div().text_size(px(12.)).line_height(px(18.)).child(format!(
+                "Screenshots: {} area · {} screen · {} text. Letters ask the model about the screen.",
+                pretty(&self.cfg.hotkeys.snap_area),
+                pretty(&self.cfg.hotkeys.snap_fullscreen),
+                pretty(&self.cfg.hotkeys.snap_ocr),
+            )))
             .child(
                 div()
                     .text_size(px(11.5))
@@ -978,9 +1015,9 @@ impl Panel {
             .items_start()
             .gap(px(6.))
             .px(px(theme::PAD))
-            .py(px(6.))
+            .py(px(7.))
             .border_t_1()
-            .border_color(theme::edge())
+            .border_color(theme::hairline())
             .child(
                 div()
                     .flex_1()
@@ -1037,6 +1074,9 @@ impl Panel {
                 (p.accelerator.clone(), format!("{} — {what}", p.label))
             })
             .collect();
+        for id in HotkeyId::SNAP {
+            rows.push((h.get(id).to_string(), id.failure_label().to_string()));
+        }
         for id in [
             HotkeyId::RegionShot,
             HotkeyId::ShotOnly,
@@ -1100,8 +1140,6 @@ impl Panel {
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_none()
-            .border_t_1()
-            .border_color(theme::edge())
             .when(!self.attachments.is_empty(), |d| {
                 d.child(div().flex().flex_wrap().gap(px(6.)).px(px(theme::PAD)).pt(px(8.)).children(
                     self.attachments.iter().map(|s| {
@@ -1145,17 +1183,110 @@ impl Panel {
                 ))
             })
             .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(px(8.))
-                    .px(px(theme::PAD))
-                    .pt(px(9.))
-                    .pb(px(10.))
-                    .child(div().text_color(theme::lamp()).text_size(px(14.)).line_height(px(20.)).child("›"))
-                    .child(div().flex_1().min_w_0().text_size(px(13.)).line_height(px(20.)).child(self.input.clone()))
-                    .child(div().mt(px(2.)).opacity(if self.input_focused { 1. } else { 0.45 }).child(key_badge("↩"))),
+                div().px(px(10.)).pt(px(8.)).pb(px(10.)).child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap(px(6.))
+                        .pl(px(12.))
+                        .pr(px(5.))
+                        .py(px(5.))
+                        .rounded(px(12.))
+                        .bg(theme::glass())
+                        .border_1()
+                        .border_color(if self.input_focused { theme::lamp_border() } else { theme::hairline() })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .py(px(3.))
+                                .text_size(px(13.))
+                                .line_height(px(20.))
+                                .child(self.input.clone()),
+                        )
+                        .child(
+                            icon_button(
+                                "attach-region",
+                                "area",
+                                false,
+                                cx.listener(|this, _, window, cx| this.region_shot(window, cx)),
+                            )
+                            .tooltip(tooltip(
+                                "Attach an area of the screen",
+                                Some(pretty(&self.cfg.hotkeys.region_shot)),
+                            )),
+                        )
+                        .child(self.render_send(cx)),
+                ),
             )
+    }
+
+    fn render_send(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let streaming = self.is_streaming();
+        let ready = streaming || !self.attachments.is_empty() || !self.input.read(cx).text().trim().is_empty();
+        swallow_mouse_down(
+            div()
+                .id("send")
+                .flex_none()
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .bg(if ready { theme::lamp() } else { theme::control() })
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.88))
+                .child(icon(if streaming { "stop" } else { "send" }).size(px(15.)).text_color(if ready {
+                    theme::void()
+                } else {
+                    theme::faint()
+                }))
+                .tooltip(tooltip(if streaming { "Stop" } else { "Ask" }, Some(if streaming { "Esc" } else { "↩" })))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if streaming {
+                        this.cancel(cx);
+                    } else {
+                        this.send(window, cx);
+                    }
+                })),
+        )
+    }
+
+    /// One click for each way to take a screenshot, with its key.
+    fn render_capture_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::snap::Mode;
+        let h = &self.cfg.hotkeys;
+        let items: [(&'static str, &'static str, &str, &str, Option<Mode>); 7] = [
+            ("snap-area", "area", "Capture an area", &h.snap_area, Some(Mode::Area)),
+            ("snap-full", "fullscreen", "Capture the screen", &h.snap_fullscreen, Some(Mode::Fullscreen)),
+            ("snap-window", "window", "Capture a window", &h.snap_any_window, Some(Mode::AnyWindow)),
+            ("snap-scroll", "scroll", "Scrolling capture", &h.snap_scrolling, Some(Mode::Scrolling)),
+            ("snap-repeat", "repeat", "Repeat the last area", &h.snap_repeat_area, Some(Mode::RepeatArea)),
+            ("snap-ocr", "scan-text", "Copy text or a QR code from the screen", &h.snap_ocr, Some(Mode::Ocr)),
+            ("snap-editor", "image", "Open the screenshot editor", &h.snap_editor, None),
+        ];
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(1.))
+            .px(px(theme::PAD - 6.))
+            .py(px(3.))
+            .border_t_1()
+            .border_color(theme::hairline())
+            .child(div().pl(px(6.)).pr(px(6.)).text_size(px(11.)).text_color(theme::faint()).child("Screenshot"))
+            .children(items.into_iter().map(|(id, glyph, what, key, mode)| {
+                icon_button(
+                    id,
+                    glyph,
+                    false,
+                    cx.listener(move |this, _, window, cx| match mode {
+                        Some(mode) => this.snap(mode, window, cx),
+                        None => this.show_editor(window, cx),
+                    }),
+                )
+                .tooltip(tooltip(what, Some(pretty(key))))
+            }))
     }
 
     fn render_toasts(&self) -> impl IntoElement {
@@ -1179,9 +1310,10 @@ impl Panel {
                     .bg(theme::raise())
                     .border_1()
                     .border_color(theme::edge())
-                    .rounded(px(4.))
+                    .rounded(px(theme::RADIUS_LG))
+                    .shadow_lg()
                     .overflow_hidden()
-                    .child(div().flex_none().w(px(2.)).bg(accent))
+                    .child(div().flex_none().w(px(3.)).bg(accent))
                     .child(
                         div()
                             .flex_1()
@@ -1251,6 +1383,7 @@ impl Render for Panel {
                     .when(self.cheatsheet_open, |d| d.child(self.render_cheatsheet(cx)))
                     .child(self.render_toasts()),
             )
+            .when(!self.cfg.window.compact, |d| d.child(self.render_capture_bar(cx)))
             .child(self.render_strip(cx))
             .child(self.render_composer(cx))
             .child(

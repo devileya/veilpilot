@@ -142,6 +142,17 @@ pub fn state(panel: &Panel, window: &Window, cx: &gpui::App) -> Value {
         "screenPermission": crate::capture::screen_permission().as_str(),
         "inputDevices": crate::audio::input_devices(),
         "regionFrame": region::native_frame(),
+        "snap": snap_state(panel, cx),
+    })
+}
+
+fn snap_state(panel: &Panel, cx: &gpui::App) -> Value {
+    json!({
+        "editorOpen": panel.snap_editor_open(cx),
+        "busy": panel.snap.busy,
+        "scrolling": panel.snap.scrolling.is_some(),
+        "last": panel.snap.last.as_ref().map(|c| json!({"width": c.image.width(), "height": c.image.height(), "label": c.label})),
+        "editor": panel.snap.editor.and_then(|h| h.read(cx).ok()).map(|e| e.dev_state()),
     })
 }
 
@@ -381,19 +392,66 @@ pub fn handle(command: Command, panel: &mut Panel, window: &mut Window, cx: &mut
             })
             .detach();
         }
-        "snapshot" | "screenshot" | "snapshot-region" | "snapshot-island" => {
+        // The screenshot tool: `snap area|fullscreen|window|anywindow|scrolling|repeat|ocr|editor`.
+        "snap" => {
+            use crate::snap::Mode;
+            let mode = match rest.as_str() {
+                "fullscreen" => Some(Mode::Fullscreen),
+                "area" => Some(Mode::Area),
+                "window" => Some(Mode::Window),
+                "anywindow" => Some(Mode::AnyWindow),
+                "scrolling" => Some(Mode::Scrolling),
+                "repeat" => Some(Mode::RepeatArea),
+                "ocr" => Some(Mode::Ocr),
+                "editor" => None,
+                _ => return reply!(format!("error: unknown snap mode {rest}")),
+            };
+            match mode {
+                Some(mode) => panel.snap(mode, window, cx),
+                None => panel.show_editor(window, cx),
+            }
+            reply!(ok());
+        }
+        // Open the editor on a PNG file, as if it had just been captured.
+        "snap-open" => match image::open(&rest) {
+            Ok(image) => {
+                panel.deliver(crate::snap::Capture::new(image.to_rgba8(), 2.0, "Test"), window, cx);
+                reply!(ok());
+            }
+            Err(err) => reply!(format!("error: {err}")),
+        },
+        // Drive the editor: `editor <command>`, see `Editor::dev`.
+        "editor" => match panel.snap.editor {
+            Some(handle) => {
+                let line = rest.clone();
+                cx.defer(move |cx| {
+                    let reply = handle
+                        .update(cx, |editor, window, cx| editor.dev(&line, window, cx))
+                        .unwrap_or_else(|_| "error: editor closed".into());
+                    let _ = tx.send(reply);
+                });
+            }
+            None => reply!("error: no editor".into()),
+        },
+        "snapshot" | "screenshot" | "snapshot-region" | "snapshot-island" | "snapshot-editor" => {
             // A protected window is invisible to every capture, ours included,
             // so protection is lifted for the capture and restored after.
             let own = verb != "screenshot";
             let target = match verb {
                 "snapshot-region" => region::native(cx),
                 "snapshot-island" => panel.island_native(),
+                "snapshot-editor" => panel.snap.editor.and_then(|h| h.read(cx).ok()).and_then(|e| e.native()),
                 _ => panel.native,
             };
             let Some(target) = target else { return reply!("error: no such window".into()) };
             // AppKit's sharingType getter is unreliable on recent macOS, so the
             // state comes from what was set: the picker is always protected.
             let was = verb == "snapshot-region" || panel.cfg.window.protection;
+            if verb == "snapshot-editor"
+                && let Some(handle) = panel.snap.editor
+            {
+                let _ = handle.update(cx, |_, window, _| window.refresh());
+            }
             if was {
                 target.set_content_protection(false);
             }

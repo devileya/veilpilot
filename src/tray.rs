@@ -3,7 +3,7 @@
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-use crate::config::Config;
+use crate::config::{Config, HotkeyId};
 use crate::hotkeys::pretty;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +13,7 @@ pub enum TrayCommand {
     NewSession,
     ToggleProtection,
     ClickThrough,
+    Snap(HotkeyId),
     Quit,
 }
 
@@ -32,6 +33,12 @@ pub struct Tray {
     new_session: MenuItem,
     protection: CheckMenuItem,
     click_through: CheckMenuItem,
+    /// The screenshot items, by the hotkey they share.
+    snaps: Vec<(HotkeyId, MenuItem)>,
+}
+
+fn snap_id(id: HotkeyId) -> String {
+    format!("snap-{id:?}")
 }
 
 impl Tray {
@@ -48,7 +55,14 @@ impl Tray {
         let click_through = CheckMenuItem::with_id("click", "Click-through", true, false, None);
         let quit = MenuItem::with_id("quit", "Quit VeilPilot", true, None);
 
+        let snaps: Vec<(HotkeyId, MenuItem)> =
+            HotkeyId::SNAP.iter().map(|id| (*id, MenuItem::with_id(snap_id(*id), "", true, None))).collect();
+
         let menu = Menu::new();
+        for (_, item) in &snaps {
+            menu.append(item)?;
+        }
+        menu.append(&PredefinedMenuItem::separator())?;
         menu.append_items(&[
             &toggle,
             &record,
@@ -74,6 +88,8 @@ impl Tray {
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             if let Some((_, cmd)) = IDS.iter().find(|(id, _)| event.id.0 == *id) {
                 menu_handler(*cmd);
+            } else if let Some(id) = HotkeyId::SNAP.iter().find(|id| event.id.0 == snap_id(**id)) {
+                menu_handler(TrayCommand::Snap(*id));
             }
         }));
         TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
@@ -82,7 +98,7 @@ impl Tray {
             }
         }));
 
-        let tray = Self { icon, toggle, record, new_session, protection, click_through };
+        let tray = Self { icon, toggle, record, new_session, protection, click_through, snaps };
         tray.refresh(cfg);
         Ok(tray)
     }
@@ -102,6 +118,11 @@ impl Tray {
         self.toggle.set_text(format!("Show / hide  ({})", pretty(&cfg.hotkeys.toggle_overlay)));
         self.record.set_text(format!("Start / stop transcribe  ({})", pretty(&cfg.hotkeys.record_toggle)));
         self.new_session.set_text(format!("New session  ({})", pretty(&cfg.hotkeys.new_session)));
+        for (id, item) in &self.snaps {
+            let key = cfg.hotkeys.get(*id);
+            let label = id.failure_label();
+            item.set_text(if key.is_empty() { label.to_string() } else { format!("{label}  ({})", pretty(key)) });
+        }
         self.protection.set_checked(protected);
         self.click_through.set_checked(cfg.window.click_through);
     }

@@ -1,8 +1,10 @@
+pub mod assets;
 pub mod island;
 pub mod markdown;
 pub mod panel;
 pub mod region;
 pub mod settings;
+pub mod snap;
 pub mod text_input;
 pub mod theme;
 pub mod widgets;

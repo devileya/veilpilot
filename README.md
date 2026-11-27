@@ -1,9 +1,10 @@
 # VeilPilot
 
-A heads-up AI copilot for macOS and Windows that **does not appear in your screen share**.
+A heads-up AI copilot for macOS and Windows that **does not appear in your screen share**,
+with a full screenshot tool built in.
 
-Take a screenshot, transcribe what is being said, ask a model about either — all from
-global hotkeys. The answer streams into a translucent panel that the capture pipeline
+Take a screenshot — annotate it, read its text, pin it, save it — transcribe what is being
+said, ask a model about either, all from global hotkeys. The answer streams into a translucent panel that the capture pipeline
 never sees.
 
 A native Rust app built on [GPUI](https://gpui.rs), the GPU-accelerated UI framework
@@ -16,7 +17,7 @@ behind the Zed editor. No Electron, no web view: the macOS app is a single 16 MB
 ├──────────────────────────────────────────┤
 │ CHAT   LIVE 2   TRANSCRIPT +3             │
 ├──────────────────────────────────────────┤  ← the seam glows while streaming
-│ ⌘⇧2  SELESAIKAN      claude-opus-5 · 11:04│
+│ ⌘⇧X  Selesaikan      claude-opus-5 · 11:04│
 │ ┌────────┐                                │
 │ │ shot   │ 1600×1000 px                   │
 │ └────────┘                                │
@@ -24,7 +25,8 @@ behind the Zed editor. No Electron, no web view: the macOS app is a single 16 MB
 │ `parseConfig` — line 42 reads             │
 │ `cfg.db.host` before the await resolves…  │
 ├──────────────────────────────────────────┤
-│ ⌘⇧1 Jelaskan  ⌘⇧2 Selesaikan  ⌘⇧3 Review  ?│  ← the hotkeys stay on screen
+│ Screenshot  ⊹ ▭ ▢ ⇣ ↻ ≡ ▣                 │  ← every capture mode, one click
+│ ⌘⇧E Jelaskan  ⌘⇧X Selesaikan  ⌘⇧C Review  ?│  ← the hotkeys stay on screen
 │ ⌘⇧R Rec  ⌘⇧A Region  ⌘⇧Y Summary  ⌘⇧\ Hide │
 ├──────────────────────────────────────────┤
 │ › ask anything                          ↵ │
@@ -139,15 +141,32 @@ Microphone again after a rebuild; a real identity keeps the grants. Notarize wit
 Defaults. `⌘` is `Ctrl` on Windows. Every one of these is editable in Settings › Keys,
 and prompt hotkeys are editable in Settings › Prompts.
 
-| Key | What it does |
+**The number row takes screenshots** (the same keys as Shottr, so it can replace it);
+**letters ask the model.**
+
+| Key | Screenshot tool |
 |---|---|
-| `⌘⇧1` | Screenshot → **Jelaskan** (explain what is on screen) |
-| `⌘⇧2` | Screenshot → **Selesaikan** (find the root cause, give concrete steps) |
-| `⌘⇧3` | Screenshot → **Review kode** |
-| `⌘⇧4` | Screenshot → **Jawab** (answer the question on screen) |
-| `⌘⇧5` | Screenshot → **Terjemahkan** |
-| `⌘⇧6` | Transcript → **Ringkas obrolan** |
-| `⌘⇧7` | Transcript → **Bantu jawab** (draft a reply you can say now) |
+| `⌘⇧1` | Fullscreen screenshot (the screen under the pointer) |
+| `⌘⇧2` | Area screenshot — crosshair, pixel loupe, size readout |
+| `⌘⇧6` | Active window screenshot |
+| `⌘⇧7` | Any window — click a window, or drag an area |
+| `⌘⇧8` | Scrolling screenshot — press again to finish |
+| `⌘⇧9` | Repeat the last area |
+| `⌃⌥⌘O` | Text / QR recognition — drag over it, the text is copied |
+| `⌘⇧0` | Show the editor (last capture, or the image on the clipboard) |
+
+macOS keeps `⌘⇧3`, `⌘⇧4` and `⌘⇧5` for its own screenshots; turn them off in System
+Settings › Keyboard › Keyboard Shortcuts › Screenshots before giving one to VeilPilot.
+
+| Key | Ask the model |
+|---|---|
+| `⌘⇧E` | Screenshot → **Jelaskan** (explain what is on screen) |
+| `⌘⇧X` | Screenshot → **Selesaikan** (find the root cause, give concrete steps) |
+| `⌘⇧C` | Screenshot → **Review kode** |
+| `⌘⇧J` | Screenshot → **Jawab** (answer the question on screen) |
+| `⌘⇧B` | Screenshot → **Terjemahkan** |
+| `⌘⇧O` | Transcript → **Ringkas obrolan** |
+| `⌘⇧H` | Transcript → **Bantu jawab** (draft a reply you can say now) |
 | `⌘⇧A` | Drag-select a region, then ask |
 | `⌘⇧S` | Attach a screenshot without asking — type your own question |
 | `⌘⇧R` | Start / stop transcribing |
@@ -165,6 +184,9 @@ and prompt hotkeys are editable in Settings › Prompts.
 | `⌥⇧` + arrows | Move the panel |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab (panel focused) |
 
+Upgrading from 0.2: prompts still on their old `⌘⇧1`–`⌘⇧7` move to the letters above;
+a prompt key you chose yourself is left alone.
+
 A hotkey another app already owns cannot be registered. VeilPilot tells you which ones
 failed on launch instead of leaving a dead key.
 
@@ -172,6 +194,37 @@ Hotkeys that fire a prompt show the panel **without taking focus**, so your meet
 keeps the keyboard. Only `⌘⇧\` and `⌘⇧↩` focus the panel.
 
 ---
+
+## Screenshot tool
+
+Everything a dedicated screenshot app does, from the same menu-bar icon (and its menu):
+
+- **Capture**: fullscreen, an area (over a frozen frame, with a crosshair, an 8× pixel
+  loupe and the size as you drag), the active window, any window (hover highlights it,
+  click takes it), the last area again, and **scrolling capture** — pick the part of the
+  page that scrolls; with Accessibility allowed VeilPilot scrolls it for you and stops at
+  the end, otherwise scroll by hand and press the key again. Frames are joined where they
+  overlap, and a sticky header or footer is written once.
+- **Editor**: arrow (tapered, line, two-way), line, rectangle and oval (outline, tinted,
+  filled), freehand, text (plain, on dark, on colour), numbered steps, highlighter, blur,
+  pixelate, erase (fills with the surrounding background), spotlight, magnifier, ruler
+  (measures the run of colour under the pointer — the gap, the margin, the box), colour
+  picker (`Tab` copies the pixel under the pointer from any tool; the selection bar copies
+  an area's average). Select to move, reshape by the handles, `⇧` for squares and 45°,
+  arrow keys nudge, `⌫` deletes, undo/redo. Drag an area to **crop** (`↩`), **copy its
+  text**, or copy its average colour. **Backdrop** frames the picture on a gradient with
+  padding, rounded corners and a shadow; **resize** scales it (e.g. a Retina capture to
+  @1x). Zoom with `⌘`+scroll, `⌘0` fits, `⌘1` is actual size.
+- **Out**: `⌘C` copy, `⌘S` save to the screenshots folder, `⇧⌘S` save as, `⌘P` **pin** it
+  above every window (drag it, scroll to resize, Esc closes), `⌘O` open a file, `⌘V`
+  paste an image, and **Ask** hands the annotated picture to the assistant.
+  `Esc` closes the editor and copies the image (Settings › Capture can turn that off).
+- **Text and QR recognition** runs on the Mac with Apple Vision — nothing is uploaded.
+- Settings › Capture: what happens after a capture (open the editor, copy, save), the
+  folder, PNG / JPEG / auto, the colour format the picker copies, joining recognized lines.
+
+The editor and pinned pictures follow the invisible toggle like the panel does: hidden
+from screen share while protection is on.
 
 ## Providers
 
@@ -401,6 +454,8 @@ src/
   hotkeys.rs         Electron-style accelerators -> global shortcuts, failure reporting
   tray.rs            menu-bar / notification-area icon and menu
   capture.rs         screenshots: pick a display, grab, crop, downscale, encode
+  snap/              the screenshot tool, no UI: annotations, effects and export
+                     (tiny-skia), text shaping, scrolling-capture stitching, OCR (Vision)
   audio.rs           microphone (+ WASAPI loopback) capture, resampling, WAV
   transcribe.rs      routes audio to the local engine or a cloud endpoint
   whisper.rs         on-device speech to text: detect, model download, run
@@ -422,9 +477,12 @@ src/
       agents.rs          the agent and context menus, system prompt, agent options
       live.rs            live answers, summarize, save to memory
       updates.rs         checking for and installing a new version
+      snap.rs            the screenshot hotkeys: capture, deliver, scrolling capture
     island.rs          notch mode: the island window
     settings.rs        Settings › AI / Voice / Capture / Prompts / Keys
-    region.rs          the drag-to-select overlay
+    region.rs          the capture overlay: area / window picking, loupe
+    snap/              the screenshot editor and pinned pictures
+    assets.rs          the SVG icon set
     text_input.rs      text field (GPUI ships none): selection, IME, clipboard, wrapping
     markdown.rs        the answer renderer
   dev.rs             the dev control channel the end-to-end tests drive

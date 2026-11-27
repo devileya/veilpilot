@@ -7385,7 +7385,7 @@ dependencies = [
 
 [[package]]
 name = "veilpilot"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7398,18 +7398,22 @@ dependencies = [
  "gpui",
  "image",
  "keyring",
+ "lyon",
  "objc2",
  "raw-window-handle",
  "regex",
  "reqwest",
+ "rustybuzz 0.20.1",
  "serde",
  "serde_json",
  "serde_yaml",
  "smallvec",
+ "tiny-skia",
  "tokio",
  "tokio-util",
  "tray-icon",
  "unicode-segmentation",
+ "usvg",
  "uuid",
  "windows 0.61.3",
  "xcap",

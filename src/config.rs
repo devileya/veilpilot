@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump this and add a step in [`migrate`] whenever a changed default must
 /// also reach installs that already have a config on disk.
-pub const CONFIG_VERSION: u32 = 2;
+pub const CONFIG_VERSION: u32 = 3;
 
 pub const SYSTEM_PROMPT: &str = "You are VeilPilot, a heads-up assistant read in a hurry on a small translucent panel
 while the user is in a live meeting, demo, interview, or presentation.
@@ -451,6 +451,73 @@ impl Default for UpdatesConfig {
     }
 }
 
+/// A rectangle on one display, in points from its top-left corner.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedArea {
+    pub display: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The screenshot tool: what happens to a capture, and how it is saved.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SnapConfig {
+    /// Open the editor after a capture.
+    pub show_editor: bool,
+    /// Put every capture on the clipboard straight away.
+    pub copy_after: bool,
+    /// Write every capture to `folder` straight away.
+    pub save_after: bool,
+    /// Where Save puts files; '' -> the Desktop.
+    pub folder: String,
+    /// "png" | "jpg" | "auto" (JPEG for photos, PNG otherwise).
+    pub format: String,
+    /// Closing the editor with Esc copies the image first.
+    pub copy_on_esc: bool,
+    /// The annotation colour, as #RRGGBB.
+    pub color: String,
+    /// "hex" | "rgb" | "hsl" — what the colour picker copies.
+    pub color_format: String,
+    /// Join the lines of recognized text into one paragraph.
+    pub ocr_join_lines: bool,
+    /// Scrolling capture stops at this many pixels.
+    pub scroll_max_height: u32,
+    /// The last area captured, for "Repeat area".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_area: Option<SavedArea>,
+}
+
+impl Default for SnapConfig {
+    fn default() -> Self {
+        Self {
+            show_editor: true,
+            copy_after: false,
+            save_after: false,
+            folder: String::new(),
+            format: "png".into(),
+            copy_on_esc: true,
+            color: "#FF3B30".into(),
+            color_format: "hex".into(),
+            ocr_join_lines: false,
+            scroll_max_height: 20000,
+            last_area: None,
+        }
+    }
+}
+
+impl SnapConfig {
+    pub fn folder_path(&self) -> PathBuf {
+        if !self.folder.trim().is_empty() {
+            return PathBuf::from(self.folder.trim());
+        }
+        dirs::desktop_dir().or_else(dirs::picture_dir).unwrap_or_else(std::env::temp_dir)
+    }
+}
+
 pub const SUMMARY_PROMPT: &str = "Ringkas transkrip percakapan berikut dalam bahasa yang dipakai di transkrip. \
 Mulai dengan satu kalimat inti, lalu poin-poin: topik utama, keputusan, dan tindak lanjut \
 (siapa, apa, kapan). Jangan mengarang hal yang tidak ada di transkrip.\n\n{{transcript}}";
@@ -587,6 +654,14 @@ pub struct HotkeyConfig {
     pub save_memory: String,
     pub toggle_notch: String,
     pub toggle_auto_answer: String,
+    pub snap_fullscreen: String,
+    pub snap_area: String,
+    pub snap_window: String,
+    pub snap_any_window: String,
+    pub snap_scrolling: String,
+    pub snap_repeat_area: String,
+    pub snap_ocr: String,
+    pub snap_editor: String,
 }
 
 /// `Command` on macOS, `Control` elsewhere — the same split Electron's
@@ -621,6 +696,17 @@ impl Default for HotkeyConfig {
             save_memory: acc("U"),
             toggle_notch: acc("N"),
             toggle_auto_answer: acc("L"),
+            // The screenshot keys live on the number row; everything that
+            // asks the model lives on letters. 3, 4 and 5 are left alone:
+            // macOS keeps its own screenshot shortcuts there.
+            snap_fullscreen: acc("1"),
+            snap_area: acc("2"),
+            snap_window: acc("6"),
+            snap_any_window: acc("7"),
+            snap_scrolling: acc("8"),
+            snap_repeat_area: acc("9"),
+            snap_ocr: if cfg!(target_os = "macos") { "Command+Control+Alt+O".into() } else { "Control+Alt+O".into() },
+            snap_editor: acc("0"),
         }
     }
 }
@@ -647,10 +733,34 @@ pub enum HotkeyId {
     SaveMemory,
     ToggleNotch,
     ToggleAutoAnswer,
+    SnapFullscreen,
+    SnapArea,
+    SnapWindow,
+    SnapAnyWindow,
+    SnapScrolling,
+    SnapRepeatArea,
+    SnapOcr,
+    SnapEditor,
 }
 
 impl HotkeyId {
-    pub const ALL: [HotkeyId; 19] = [
+    /// The screenshot tool's keys, in the order Settings lists them.
+    pub const SNAP: [HotkeyId; 8] = [
+        HotkeyId::SnapFullscreen,
+        HotkeyId::SnapArea,
+        HotkeyId::SnapWindow,
+        HotkeyId::SnapAnyWindow,
+        HotkeyId::SnapScrolling,
+        HotkeyId::SnapRepeatArea,
+        HotkeyId::SnapOcr,
+        HotkeyId::SnapEditor,
+    ];
+
+    pub fn is_snap(self) -> bool {
+        Self::SNAP.contains(&self)
+    }
+
+    pub const ALL: [HotkeyId; 27] = [
         HotkeyId::ToggleOverlay,
         HotkeyId::ShotOnly,
         HotkeyId::RegionShot,
@@ -670,6 +780,14 @@ impl HotkeyId {
         HotkeyId::SaveMemory,
         HotkeyId::ToggleNotch,
         HotkeyId::ToggleAutoAnswer,
+        HotkeyId::SnapFullscreen,
+        HotkeyId::SnapArea,
+        HotkeyId::SnapWindow,
+        HotkeyId::SnapAnyWindow,
+        HotkeyId::SnapScrolling,
+        HotkeyId::SnapRepeatArea,
+        HotkeyId::SnapOcr,
+        HotkeyId::SnapEditor,
     ];
 
     /// Short label for Settings › Keys.
@@ -694,6 +812,14 @@ impl HotkeyId {
             HotkeyId::SaveMemory => "Save to memory",
             HotkeyId::ToggleNotch => "Notch mode",
             HotkeyId::ToggleAutoAnswer => "Auto-answer",
+            HotkeyId::SnapFullscreen => "Fullscreen",
+            HotkeyId::SnapArea => "Area",
+            HotkeyId::SnapWindow => "Active window",
+            HotkeyId::SnapAnyWindow => "Any window",
+            HotkeyId::SnapScrolling => "Scrolling",
+            HotkeyId::SnapRepeatArea => "Repeat area",
+            HotkeyId::SnapOcr => "Text / QR",
+            HotkeyId::SnapEditor => "Show editor",
         }
     }
 
@@ -719,6 +845,14 @@ impl HotkeyId {
             HotkeyId::SaveMemory => "Save to memory",
             HotkeyId::ToggleNotch => "Notch mode",
             HotkeyId::ToggleAutoAnswer => "Auto-answer",
+            HotkeyId::SnapFullscreen => "Fullscreen screenshot",
+            HotkeyId::SnapArea => "Area screenshot",
+            HotkeyId::SnapWindow => "Active window screenshot",
+            HotkeyId::SnapAnyWindow => "Any window screenshot",
+            HotkeyId::SnapScrolling => "Scrolling screenshot",
+            HotkeyId::SnapRepeatArea => "Repeat area screenshot",
+            HotkeyId::SnapOcr => "Text / QR recognition",
+            HotkeyId::SnapEditor => "Show the screenshot editor",
         }
     }
 }
@@ -745,6 +879,14 @@ impl HotkeyConfig {
             HotkeyId::SaveMemory => &self.save_memory,
             HotkeyId::ToggleNotch => &self.toggle_notch,
             HotkeyId::ToggleAutoAnswer => &self.toggle_auto_answer,
+            HotkeyId::SnapFullscreen => &self.snap_fullscreen,
+            HotkeyId::SnapArea => &self.snap_area,
+            HotkeyId::SnapWindow => &self.snap_window,
+            HotkeyId::SnapAnyWindow => &self.snap_any_window,
+            HotkeyId::SnapScrolling => &self.snap_scrolling,
+            HotkeyId::SnapRepeatArea => &self.snap_repeat_area,
+            HotkeyId::SnapOcr => &self.snap_ocr,
+            HotkeyId::SnapEditor => &self.snap_editor,
         }
     }
 
@@ -769,10 +911,30 @@ impl HotkeyConfig {
             HotkeyId::SaveMemory => &mut self.save_memory,
             HotkeyId::ToggleNotch => &mut self.toggle_notch,
             HotkeyId::ToggleAutoAnswer => &mut self.toggle_auto_answer,
+            HotkeyId::SnapFullscreen => &mut self.snap_fullscreen,
+            HotkeyId::SnapArea => &mut self.snap_area,
+            HotkeyId::SnapWindow => &mut self.snap_window,
+            HotkeyId::SnapAnyWindow => &mut self.snap_any_window,
+            HotkeyId::SnapScrolling => &mut self.snap_scrolling,
+            HotkeyId::SnapRepeatArea => &mut self.snap_repeat_area,
+            HotkeyId::SnapOcr => &mut self.snap_ocr,
+            HotkeyId::SnapEditor => &mut self.snap_editor,
         };
         *slot = value;
     }
 }
+
+/// The keys the stock prompts had while they lived on the number row
+/// (config versions 1 and 2), and the letters they moved to.
+const PROMPT_KEY_MOVES: [(&str, &str, &str); 7] = [
+    ("explain", "1", "E"),
+    ("solve", "2", "X"),
+    ("code", "3", "C"),
+    ("answer", "4", "J"),
+    ("translate", "5", "B"),
+    ("recap", "6", "O"),
+    ("reply", "7", "H"),
+];
 
 pub fn default_prompts() -> Vec<PromptPreset> {
     let p = |id: &str, label: &str, key: &str, source, effort: Option<&str>, text: &str| PromptPreset {
@@ -788,7 +950,7 @@ pub fn default_prompts() -> Vec<PromptPreset> {
         p(
             "explain",
             "Jelaskan",
-            "1",
+            "E",
             PromptSource::Screenshot,
             None,
             "Jelaskan apa yang ada di layar ini dan apa maksudnya.",
@@ -796,7 +958,7 @@ pub fn default_prompts() -> Vec<PromptPreset> {
         p(
             "solve",
             "Selesaikan",
-            "2",
+            "X",
             PromptSource::Screenshot,
             Some("high"),
             "Ada masalah di layar ini. Sebutkan akar masalahnya, lalu langkah perbaikan yang konkret dan bisa langsung dikerjakan.",
@@ -804,7 +966,7 @@ pub fn default_prompts() -> Vec<PromptPreset> {
         p(
             "code",
             "Review kode",
-            "3",
+            "C",
             PromptSource::Screenshot,
             Some("high"),
             "Review kode di layar ini: bug, edge case, dan hal yang perlu diperbaiki. Tunjukkan potongan kode versi perbaikannya.",
@@ -812,7 +974,7 @@ pub fn default_prompts() -> Vec<PromptPreset> {
         p(
             "answer",
             "Jawab",
-            "4",
+            "J",
             PromptSource::Screenshot,
             None,
             "Jawab pertanyaan yang terlihat di layar. Jawabannya dulu, lalu satu baris alasan.",
@@ -820,7 +982,7 @@ pub fn default_prompts() -> Vec<PromptPreset> {
         p(
             "translate",
             "Terjemahkan",
-            "5",
+            "B",
             PromptSource::Screenshot,
             None,
             "Terjemahkan semua teks di layar ke Bahasa Indonesia yang natural. Pertahankan strukturnya.",
@@ -828,7 +990,7 @@ pub fn default_prompts() -> Vec<PromptPreset> {
         p(
             "recap",
             "Ringkas obrolan",
-            "6",
+            "O",
             PromptSource::Transcript,
             None,
             "Ringkas transkrip berikut jadi poin-poin, lalu satu pertanyaan bagus untuk ditanyakan berikutnya.\n\n{{transcript}}",
@@ -836,7 +998,7 @@ pub fn default_prompts() -> Vec<PromptPreset> {
         p(
             "reply",
             "Bantu jawab",
-            "7",
+            "H",
             PromptSource::Transcript,
             None,
             "Berdasarkan transkrip ini, susun jawaban singkat yang bisa saya ucapkan sekarang.\n\n{{transcript}}",
@@ -855,6 +1017,7 @@ pub struct Config {
     pub context: ContextConfig,
     pub live: LiveConfig,
     pub updates: UpdatesConfig,
+    pub snap: SnapConfig,
     pub prompts: Vec<PromptPreset>,
     pub hotkeys: HotkeyConfig,
 }
@@ -870,6 +1033,7 @@ impl Default for Config {
             context: ContextConfig::default(),
             live: LiveConfig::default(),
             updates: UpdatesConfig::default(),
+            snap: SnapConfig::default(),
             prompts: default_prompts(),
             hotkeys: HotkeyConfig::default(),
         }
@@ -915,9 +1079,37 @@ fn migrate(cfg: &mut Config, from: u32, has_key: &dyn Fn(&str) -> bool) -> bool 
             }
             migrated = true;
         }
+        if v == 2 {
+            // 2 -> 3: the number row became the screenshot tool's. Stock
+            // prompts still on their old number move to a letter; a key the
+            // user chose themselves is left alone, and a screenshot key that
+            // would land on one of those stays unbound instead.
+            move_prompts_to_letters(cfg);
+            migrated = true;
+        }
         v += 1;
     }
     migrated
+}
+
+fn move_prompts_to_letters(cfg: &mut Config) {
+    for (id, old, new) in PROMPT_KEY_MOVES {
+        let (old, new) = (acc(old), acc(new));
+        let taken = HotkeyId::ALL.iter().any(|h| cfg.hotkeys.get(*h) == new)
+            || cfg.prompts.iter().any(|p| p.accelerator == new);
+        if let Some(preset) = cfg.prompts.iter_mut().find(|p| p.id == id && p.accelerator == old) {
+            preset.accelerator = if taken { String::new() } else { new };
+        }
+    }
+    for id in HotkeyId::SNAP {
+        let key = cfg.hotkeys.get(id).to_string();
+        let clash = !key.is_empty()
+            && (cfg.prompts.iter().any(|p| p.accelerator == key)
+                || HotkeyId::ALL.iter().any(|other| *other != id && cfg.hotkeys.get(*other) == key));
+        if clash {
+            cfg.hotkeys.set(id, String::new());
+        }
+    }
 }
 
 /// Parse a config file's text. Unknown or malformed fields fall back to their
@@ -966,6 +1158,7 @@ fn from_value_lenient(value: serde_json::Value) -> Config {
     section!("context", context);
     section!("live", live);
     section!("updates", updates);
+    section!("snap", snap);
     section!("prompts", prompts);
     section!("hotkeys", hotkeys);
     cfg
@@ -976,10 +1169,8 @@ pub fn load(has_key: &dyn Fn(&str) -> bool) -> Config {
     match std::fs::read_to_string(&path) {
         Ok(text) => {
             let (cfg, needs_write) = parse(&text, has_key);
-            if needs_write {
-                if let Err(err) = save(&cfg) {
-                    eprintln!("[config] could not persist migrated config: {err:#}");
-                }
+            if needs_write && let Err(err) = save(&cfg) {
+                eprintln!("[config] could not persist migrated config: {err:#}");
             }
             cfg
         }
@@ -1057,7 +1248,7 @@ mod tests {
     #[test]
     fn electron_config_round_trips() {
         let text = r#"{
-          "version": 2,
+          "version": 3,
           "chat": { "provider": "claudecode", "model": "sonnet", "effort": "low",
                     "claudeCode": { "binaryPath": "", "fastStart": true, "maxBudgetUsd": 0 } },
           "window": { "bounds": { "x": 1142, "y": 49, "width": 431, "height": 581 },
@@ -1094,6 +1285,41 @@ mod tests {
 
         let (cfg, _) = parse(text, &|id| id == "openai");
         assert_eq!(cfg.transcription.provider, "openai", "anyone with a key keeps cloud");
+    }
+
+    #[test]
+    fn migration_from_v2_moves_stock_prompts_off_the_number_row() {
+        let key = |k: &str| acc(k);
+        let text = serde_json::json!({
+            "version": 2,
+            "prompts": [
+                { "id": "explain", "label": "Jelaskan", "accelerator": key("1"), "source": "screenshot", "text": "x" },
+                { "id": "solve", "label": "Selesaikan", "accelerator": key("F2"), "source": "screenshot", "text": "x" },
+                { "id": "mine", "label": "Mine", "accelerator": key("9"), "source": "screenshot", "text": "x" },
+            ],
+        })
+        .to_string();
+        let (cfg, write) = parse(&text, &|_| false);
+        assert!(write);
+        assert_eq!(cfg.prompts[0].accelerator, key("E"), "a stock key moves to its letter");
+        assert_eq!(cfg.prompts[1].accelerator, key("F2"), "a key the user chose stays");
+        assert_eq!(cfg.prompts[2].accelerator, key("9"), "and so does a preset of their own");
+        assert_eq!(cfg.hotkeys.snap_fullscreen, key("1"));
+        assert_eq!(cfg.hotkeys.snap_repeat_area, "", "a screenshot key never takes a key that is in use");
+    }
+
+    #[test]
+    fn no_default_key_is_bound_twice() {
+        let cfg = Config::default();
+        let mut seen = std::collections::HashSet::new();
+        for id in HotkeyId::ALL {
+            assert!(seen.insert(cfg.hotkeys.get(id).to_string()), "{id:?} repeats a key");
+        }
+        for p in &cfg.prompts {
+            assert!(seen.insert(p.accelerator.clone()), "{} repeats a key", p.id);
+            let key = p.accelerator.rsplit('+').next().unwrap();
+            assert!(key.chars().all(|c| c.is_ascii_alphabetic()), "{} is not on a letter", p.id);
+        }
     }
 
     #[test]

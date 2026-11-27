@@ -4,6 +4,7 @@
 
 mod agents;
 mod live;
+mod snap;
 mod updates;
 mod view;
 
@@ -19,7 +20,7 @@ use gpui::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::region::{RegionPicker, RegionResult};
+use super::region::{PickMode, RegionPicker, RegionResult};
 use super::settings::{SettingsTab, SettingsView};
 use super::text_input::{InputEvent, TextInput};
 use crate::ai::{self, BuiltPrompt, Chunk, StreamEvent};
@@ -218,6 +219,7 @@ pub struct Panel {
     region_open: bool,
     /// Screenshots in flight, so "idle" means nothing is pending at all.
     pub capturing: usize,
+    pub snap: snap::SnapState,
     mark: Arc<gpui::RenderImage>,
     input_focused: bool,
     _subscriptions: Vec<Subscription>,
@@ -303,6 +305,7 @@ impl Panel {
             save_bounds: None,
             region_open: false,
             capturing: 0,
+            snap: Default::default(),
             mark,
             input_focused: false,
             _subscriptions: subscriptions,
@@ -656,6 +659,7 @@ impl Panel {
                 TrayCommand::NewSession => self.new_session(cx),
                 TrayCommand::ToggleProtection => self.toggle_protection(cx),
                 TrayCommand::ClickThrough => self.toggle_click_through(cx),
+                TrayCommand::Snap(id) => self.run_action(Action::Builtin(id), window, cx),
                 TrayCommand::Quit => cx.quit(),
             },
             External::Hotkey(id) => {
@@ -693,6 +697,14 @@ impl Panel {
                 HotkeyId::SaveMemory => self.save_memory(window, cx),
                 HotkeyId::ToggleNotch => self.toggle_notch(window, cx),
                 HotkeyId::ToggleAutoAnswer => self.toggle_auto_answer(cx),
+                HotkeyId::SnapFullscreen => self.snap(crate::snap::Mode::Fullscreen, window, cx),
+                HotkeyId::SnapArea => self.snap(crate::snap::Mode::Area, window, cx),
+                HotkeyId::SnapWindow => self.snap(crate::snap::Mode::Window, window, cx),
+                HotkeyId::SnapAnyWindow => self.snap(crate::snap::Mode::AnyWindow, window, cx),
+                HotkeyId::SnapScrolling => self.snap(crate::snap::Mode::Scrolling, window, cx),
+                HotkeyId::SnapRepeatArea => self.snap(crate::snap::Mode::RepeatArea, window, cx),
+                HotkeyId::SnapOcr => self.snap(crate::snap::Mode::Ocr, window, cx),
+                HotkeyId::SnapEditor => self.show_editor(window, cx),
             },
         }
     }
@@ -874,7 +886,8 @@ impl Panel {
                     ShotMode::Full => Some(frame.image),
                     ShotMode::Region => {
                         let frame = Arc::new(frame);
-                        let rect = RegionPicker::pick(frame.clone(), cx).await;
+                        let rect =
+                            RegionPicker::pick(frame.clone(), PickMode::Area("Drag over what to ask about"), cx).await;
                         match rect {
                             RegionResult::Selected(rect) => capture::crop(&frame, rect),
                             RegionResult::Cancelled => None,
@@ -1487,16 +1500,14 @@ pub fn stamp(ms: i64) -> String {
 }
 
 /// Drive the panel from platform-thread events.
-pub fn pump_external(
+pub async fn pump_external(
     panel: WeakEntity<Panel>,
     mut rx: futures::channel::mpsc::UnboundedReceiver<External>,
     cx: &mut AsyncWindowContext,
-) -> impl std::future::Future<Output = ()> + '_ {
-    async move {
-        while let Some(event) = rx.next().await {
-            if panel.update_in(cx, |panel, window, cx| panel.handle_external(event, window, cx)).is_err() {
-                break;
-            }
+) {
+    while let Some(event) = rx.next().await {
+        if panel.update_in(cx, |panel, window, cx| panel.handle_external(event, window, cx)).is_err() {
+            break;
         }
     }
 }

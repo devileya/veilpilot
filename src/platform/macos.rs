@@ -73,6 +73,18 @@ unsafe extern "C" {
     fn CGEventGetLocation(event: *mut c_void) -> CGPoint;
     fn CGEventCreateScrollWheelEvent(source: *const c_void, units: u32, count: u32, wheel1: i32, ...) -> *mut c_void;
     fn CGEventSetLocation(event: *mut c_void, location: CGPoint);
+    fn CGEventPost(tap: u32, event: *mut c_void);
+    fn CGPreflightPostEventAccess() -> bool;
+    fn CGRequestPostEventAccess() -> bool;
+    fn CGWarpMouseCursorPosition(point: CGPoint) -> i32;
+    fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> Id;
+    static kCGWindowNumber: Id;
+    static kCGWindowOwnerPID: Id;
+    static kCGWindowOwnerName: Id;
+    static kCGWindowName: Id;
+    static kCGWindowLayer: Id;
+    static kCGWindowAlpha: Id;
+    static kCGWindowBounds: Id;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -195,6 +207,110 @@ pub fn cursor_position() -> (f64, f64) {
     }
 }
 
+/* ---------- other apps' windows ---------- */
+
+unsafe fn ns_to_string(ns: Id) -> String {
+    if ns.is_null() {
+        return String::new();
+    }
+    let utf8: *const std::ffi::c_char = unsafe { msg_send![ns, UTF8String] };
+    if utf8.is_null() { String::new() } else { unsafe { CStr::from_ptr(utf8) }.to_string_lossy().into_owned() }
+}
+
+/// Ordinary app windows on screen, front to back. Menus, the Dock, the menu
+/// bar and other system layers are left out.
+pub fn windows() -> Vec<super::WindowInfo> {
+    // kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
+    const ON_SCREEN: u32 = 1 | 16;
+    let mut out = Vec::new();
+    unsafe {
+        let list = CGWindowListCopyWindowInfo(ON_SCREEN, 0);
+        if list.is_null() {
+            return out;
+        }
+        let count: usize = msg_send![list, count];
+        let number = |dict: Id, key: Id| -> f64 {
+            let value: Id = msg_send![dict, objectForKey: key];
+            if value.is_null() { 0.0 } else { msg_send![value, doubleValue] }
+        };
+        for i in 0..count {
+            let dict: Id = msg_send![list, objectAtIndex: i];
+            if number(dict, kCGWindowLayer) != 0.0 || number(dict, kCGWindowAlpha) <= 0.0 {
+                continue;
+            }
+            let bounds: Id = msg_send![dict, objectForKey: kCGWindowBounds];
+            if bounds.is_null() {
+                continue;
+            }
+            let rect = Rect {
+                x: number(bounds, nsstring(c"X")),
+                y: number(bounds, nsstring(c"Y")),
+                width: number(bounds, nsstring(c"Width")),
+                height: number(bounds, nsstring(c"Height")),
+            };
+            if rect.width < 40.0 || rect.height < 40.0 {
+                continue;
+            }
+            let owner: Id = msg_send![dict, objectForKey: kCGWindowOwnerName];
+            let title: Id = msg_send![dict, objectForKey: kCGWindowName];
+            out.push(super::WindowInfo {
+                id: number(dict, kCGWindowNumber) as u32,
+                pid: number(dict, kCGWindowOwnerPID) as u32,
+                app: ns_to_string(owner),
+                title: ns_to_string(title),
+                bounds: rect,
+            });
+        }
+        CFRelease(list as *const c_void);
+    }
+    out
+}
+
+/// The process the user is working in.
+pub fn frontmost_pid() -> Option<u32> {
+    unsafe {
+        let workspace: Id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let app: Id = msg_send![workspace, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        (pid > 0).then_some(pid as u32)
+    }
+}
+
+/// Whether this app may send input to others (Accessibility). Scrolling
+/// capture scrolls for you when it can.
+pub fn can_post_events() -> bool {
+    unsafe { CGPreflightPostEventAccess() }
+}
+
+/// Ask for it; macOS shows its prompt the first time only.
+pub fn request_post_events() -> bool {
+    unsafe { CGRequestPostEventAccess() }
+}
+
+/// Put the pointer at a point in global top-left coordinates.
+pub fn move_cursor(x: f64, y: f64) {
+    unsafe {
+        CGWarpMouseCursorPosition(CGPoint { x, y });
+    }
+}
+
+/// Scroll whatever is under `(x, y)` down by `pixels`.
+pub fn post_scroll(x: f64, y: f64, pixels: i32) {
+    unsafe {
+        // Unit 0 is pixels; a negative wheel value scrolls the content up.
+        let event = CGEventCreateScrollWheelEvent(std::ptr::null(), 0, 1, -pixels);
+        if event.is_null() {
+            return;
+        }
+        CGEventSetLocation(event, CGPoint { x, y });
+        CGEventPost(0, event);
+        CFRelease(event);
+    }
+}
+
 /// The original `windowDidBecomeKey:` of GPUI's window classes.
 static GPUI_DID_BECOME_KEY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
@@ -234,10 +350,10 @@ pub fn guard_key_window_deadlock() {
             let ours: objc2::runtime::Imp =
                 std::mem::transmute(did_become_key as unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject));
             // Both classes share GPUI's function; keep the first original.
-            if let Some(previous) = ffi::method_setImplementation(method, ours) {
-                if previous as usize != ours as usize {
-                    let _ = GPUI_DID_BECOME_KEY.set(previous as usize);
-                }
+            if let Some(previous) = ffi::method_setImplementation(method, ours)
+                && previous as usize != ours as usize
+            {
+                let _ = GPUI_DID_BECOME_KEY.set(previous as usize);
             }
         }
     }

@@ -52,6 +52,76 @@ pub struct DisplayInfo {
     pub notch: Option<Rect>,
 }
 
+/// Another app's window, in the same global top-left points as displays.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowInfo {
+    /// The id screen capture knows it by.
+    pub id: u32,
+    pub pid: u32,
+    pub app: String,
+    pub title: String,
+    pub bounds: Rect,
+}
+
+/// Windows as xcap lists them, for the platforms without a native listing.
+/// xcap reports physical pixels there, so positions are scaled back to the
+/// points everything else here uses.
+#[cfg(not(target_os = "macos"))]
+pub fn windows() -> Vec<WindowInfo> {
+    let mut list: Vec<(i32, WindowInfo)> = xcap::Window::all()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|w| !w.is_minimized().unwrap_or(false))
+        .filter_map(|w| {
+            let scale = w.current_monitor().ok().and_then(|m| m.scale_factor().ok()).unwrap_or(1.0) as f64;
+            let scale = if cfg!(windows) { scale.max(1.0) } else { 1.0 };
+            let bounds = Rect {
+                x: w.x().ok()? as f64 / scale,
+                y: w.y().ok()? as f64 / scale,
+                width: w.width().ok()? as f64 / scale,
+                height: w.height().ok()? as f64 / scale,
+            };
+            if bounds.width < 40.0 || bounds.height < 40.0 {
+                return None;
+            }
+            let info = WindowInfo {
+                id: w.id().ok()?,
+                pid: w.pid().unwrap_or(0),
+                app: w.app_name().unwrap_or_default(),
+                title: w.title().unwrap_or_default(),
+                bounds,
+            };
+            Some((w.z().unwrap_or(0), info))
+        })
+        .collect();
+    // Front to back.
+    list.sort_by(|a, b| b.0.cmp(&a.0));
+    list.into_iter().map(|(_, info)| info).collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn frontmost_pid() -> Option<u32> {
+    xcap::Window::all().ok()?.into_iter().find(|w| w.is_focused().unwrap_or(false))?.pid().ok()
+}
+
+/// Sending input to other apps is a macOS-only path here; elsewhere a
+/// scrolling capture follows the user's own scrolling.
+#[cfg(not(target_os = "macos"))]
+pub fn can_post_events() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_post_events() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn move_cursor(_x: f64, _y: f64) {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn post_scroll(_x: f64, _y: f64, _pixels: i32) {}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Permission {
     Granted,

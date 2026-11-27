@@ -11,7 +11,7 @@ use gpui::{
 use super::panel::{Panel, ToastKind};
 use super::text_input::{InputEvent, TextInput};
 use super::theme;
-use super::widgets::{button, caps, checkbox, chrome_button, field, hint, hint_colored, section, swallow_mouse_down};
+use super::widgets::{button, checkbox, field, hint, hint_colored, section, swallow_mouse_down};
 use crate::ai::claude_code;
 use crate::capture;
 use crate::config::{Config, HotkeyId, PROVIDERS, PromptPreset, PromptSource, ProviderKind, provider_by_id};
@@ -430,6 +430,11 @@ impl SettingsView {
             "live.summaryPrompt" => {
                 c.live.summary_prompt =
                     if value.trim().is_empty() { crate::config::SUMMARY_PROMPT.to_string() } else { value.clone() };
+            }
+            "snap.folder" => c.snap.folder = value.trim().to_string(),
+            "snap.scrollMaxHeight" => {
+                c.snap.scroll_max_height = num(&value, 1000.0, 100_000.0, c.snap.scroll_max_height as f64) as u32;
+                normalized = Some(c.snap.scroll_max_height.to_string());
             }
             "window.opacity" => {
                 c.window.opacity = num(&value, 0.25, 1.0, c.window.opacity as f64) as f32;
@@ -1377,7 +1382,8 @@ impl SettingsView {
         let capture = snap.cfg.capture.clone();
         let win = snap.cfg.window.clone();
         let me = cx.entity().downgrade();
-        let mut out = vec![section("Screenshots", true).into_any_element()];
+        let mut out = self.view_snap_tool(snap, window, cx);
+        out.push(section("Asking about the screen", false).into_any_element());
         if cfg!(target_os = "macos") && snap.screen != Permission::Granted {
             out.push(
                 div()
@@ -1528,6 +1534,169 @@ impl SettingsView {
             .into_any_element(),
         );
         out.push(hint(format!("Config: **{}**", crate::config::config_path().display())).into_any_element());
+        out
+    }
+
+    /// The screenshot tool: what happens after a capture, where files go.
+    fn view_snap_tool(&mut self, snap: &Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let s = snap.cfg.snap.clone();
+        let me = cx.entity().downgrade();
+        let toggle = |id: &'static str, value: bool, label: &'static str, apply: fn(&mut Config, bool)| {
+            let me = me.clone();
+            checkbox(id, value, label, move |on, window, cx| {
+                let _ = me.update(cx, |this, cx| this.set(window, cx, false, move |c| apply(c, on)));
+            })
+            .into_any_element()
+        };
+        let mut out = vec![
+            section("Screenshot tool", true).into_any_element(),
+            hint(format!(
+                "**{}** fullscreen · **{}** area · **{}** text — every key is in settings › Keys.",
+                hotkeys::pretty(&snap.cfg.hotkeys.snap_fullscreen),
+                hotkeys::pretty(&snap.cfg.hotkeys.snap_area),
+                hotkeys::pretty(&snap.cfg.hotkeys.snap_ocr),
+            ))
+            .mb(px(14.))
+            .into_any_element(),
+            field(
+                "After a capture",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(toggle("snap-editor", s.show_editor, "Open it in the editor", |c, on| {
+                        c.snap.show_editor = on
+                    }))
+                    .child(toggle("snap-copy", s.copy_after, "Copy it to the clipboard", |c, on| {
+                        c.snap.copy_after = on
+                    }))
+                    .child(toggle("snap-save", s.save_after, "Save it to the screenshots folder", |c, on| {
+                        c.snap.save_after = on
+                    }))
+                    .child(toggle(
+                        "snap-esc",
+                        s.copy_on_esc,
+                        "Closing the editor with Esc copies the image",
+                        |c, on| c.snap.copy_on_esc = on,
+                    )),
+                None,
+            )
+            .into_any_element(),
+        ];
+        let folder =
+            self.input("snap.folder", &s.folder, &s.folder_path().display().to_string(), FieldKind::Text, window, cx);
+        let choose = button(
+            "snap-folder",
+            "Choose…",
+            false,
+            cx.listener(|_, _, _, cx| {
+                let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: Some("Use this folder".into()),
+                });
+                cx.spawn(async move |this, cx| {
+                    let Ok(Ok(Some(paths))) = chosen.await else { return };
+                    let Some(path) = paths.into_iter().next() else { return };
+                    let value = path.display().to_string();
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(input) = this.inputs.get("snap.folder").cloned() {
+                            input.update(cx, |i, cx| i.set_text(value.clone(), cx));
+                        }
+                        if let Some(panel) = this.panel.upgrade() {
+                            panel.update(cx, |panel, _| panel.set_snap(|s| s.folder = value));
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }),
+        );
+        out.push(
+            field(
+                "Screenshots folder",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().min_w_0().child(input_box(folder)))
+                    .child(choose),
+                Some(hint("Empty means the Desktop.").into_any_element()),
+            )
+            .into_any_element(),
+        );
+        out.push(row(vec![
+            field(
+                "Save as",
+                self.select(
+                    "snap.format",
+                    &s.format,
+                    vec![
+                        ("png".into(), "PNG".into()),
+                        ("jpg".into(), "JPEG".into()),
+                        ("auto".into(), "Auto (JPEG for photos)".into()),
+                    ],
+                    |this, v, window, cx| this.set(window, cx, false, move |c| c.snap.format = v),
+                    cx,
+                ),
+                None,
+            )
+            .into_any_element(),
+            field(
+                "Colour picker copies",
+                self.select(
+                    "snap.colorFormat",
+                    &s.color_format,
+                    vec![
+                        ("hex".into(), "HEX  #FF3B30".into()),
+                        ("rgb".into(), "RGB  rgb(255, 59, 48)".into()),
+                        ("hsl".into(), "HSL  hsl(3, 100%, 59%)".into()),
+                    ],
+                    |this, v, window, cx| this.set(window, cx, false, move |c| c.snap.color_format = v),
+                    cx,
+                ),
+                None,
+            )
+            .into_any_element(),
+        ]));
+        let max_height = self.input(
+            "snap.scrollMaxHeight",
+            &s.scroll_max_height.to_string(),
+            "20000",
+            FieldKind::Number,
+            window,
+            cx,
+        );
+        out.push(
+            field(
+                "Scrolling capture stops at (px)",
+                input_box(max_height),
+                Some(hint(if cfg!(target_os = "macos") {
+                    "With Accessibility allowed for VeilPilot it scrolls the page for you; without it, scroll by hand and press the key again to finish."
+                } else {
+                    "Scroll the page by hand, then press the key again to finish."
+                }).into_any_element()),
+            )
+            .into_any_element(),
+        );
+        out.push(
+            field(
+                "Text recognition",
+                toggle("snap-ocr-join", s.ocr_join_lines, "Join lines into one paragraph", |c, on| {
+                    c.snap.ocr_join_lines = on
+                }),
+                Some(
+                    hint(if crate::snap::ocr::available() {
+                        "Runs on this Mac (Apple Vision) — reads text and QR codes, nothing is uploaded."
+                    } else {
+                        "Only available on macOS for now."
+                    })
+                    .into_any_element(),
+                ),
+            )
+            .into_any_element(),
+        );
         out
     }
 
@@ -1734,10 +1903,65 @@ impl SettingsView {
     }
 
     fn view_keys(&mut self, snap: &Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut out = vec![
-            section("API keys", true).into_any_element(),
-            hint("Stored encrypted by the OS keystore, never in the config file.").mb(px(14.)).into_any_element(),
-        ];
+        let mut out = vec![section("Screenshot hotkeys", true).into_any_element()];
+        out.push(
+            hint(if cfg!(target_os = "macos") {
+                "The number row, as in Shottr. macOS keeps ⌘⇧3, ⌘⇧4 and ⌘⇧5 for its own screenshots — to give one of them to VeilPilot, turn it off in System Settings › Keyboard › Keyboard Shortcuts › Screenshots first. Quit Shottr (or clear its keys) so the two apps don't fight over the same ones."
+            } else {
+                "The number row is for screenshots; asking the model is on letters."
+            })
+            .mb(px(14.))
+            .into_any_element(),
+        );
+        if cfg!(target_os = "macos") {
+            out.push(
+                div()
+                    .mb(px(14.))
+                    .flex()
+                    .child(button("open-shortcuts", "Open Keyboard Shortcuts", false, |_, _, _| {
+                        crate::platform::open_external(
+                            "x-apple.systempreferences:com.apple.Keyboard-Settings.extension",
+                        );
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let hotkey_row = |this: &mut Self, id: HotkeyId, window: &mut Window, cx: &mut Context<Self>| {
+            let value = snap.cfg.hotkeys.get(id).to_string();
+            let failed = this
+                .panel
+                .upgrade()
+                .is_some_and(|p| p.read(cx).hotkey_errors.iter().any(|f| !value.is_empty() && f.accelerator == value));
+            let hk = this.hotkey_field(&hotkey_path(id), &value, window, cx);
+            div()
+                .flex()
+                .items_center()
+                .gap(px(9.))
+                .mb(px(9.))
+                .child(div().flex_none().w(px(110.)).text_size(px(12.)).child(id.settings_label()))
+                .child(hk)
+                .when(failed, |d| {
+                    d.child(div().flex_none().text_size(px(10.5)).text_color(theme::live()).child("taken"))
+                })
+                .into_any_element()
+        };
+        for id in HotkeyId::SNAP {
+            out.push(hotkey_row(self, id, window, cx));
+        }
+
+        out.push(section("Panel hotkeys", false).into_any_element());
+        out.push(
+            hint("Click a box and press the combination. At least one modifier is required. A key another app already owns is reported as taken. Prompt hotkeys are in settings › Prompts.")
+                .mb(px(14.))
+                .into_any_element(),
+        );
+        for id in HotkeyId::ALL.into_iter().filter(|id| !id.is_snap()) {
+            out.push(hotkey_row(self, id, window, cx));
+        }
+        out.push(section("API keys", false).into_any_element());
+        out.extend([hint("Stored encrypted by the OS keystore, never in the config file.")
+            .mb(px(14.))
+            .into_any_element()]);
         for p in PROVIDERS.iter().filter(|p| p.needs_key) {
             let saved = snap.keys.get(p.id).copied().unwrap_or(false);
             let input = self.input(
@@ -1791,26 +2015,6 @@ impl SettingsView {
             }
         }
 
-        out.push(section("Global hotkeys", false).into_any_element());
-        out.push(
-            hint("Click a box and press the combination. At least one modifier is required. A key another app already owns is reported as unavailable.")
-                .mb(px(14.))
-                .into_any_element(),
-        );
-        for id in HotkeyId::ALL {
-            let value = snap.cfg.hotkeys.get(id).to_string();
-            let hk = self.hotkey_field(&hotkey_path(id), &value, window, cx);
-            out.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(9.))
-                    .mb(px(11.))
-                    .child(div().flex_none().w(px(96.)).text_size(px(11.5)).child(id.settings_label()))
-                    .child(hk)
-                    .into_any_element(),
-            );
-        }
         out.push(
             div()
                 .mt(px(8.))
@@ -1886,11 +2090,11 @@ impl Render for SettingsView {
                     .h(px(theme::RAIL_H))
                     .flex()
                     .items_center()
-                    .gap(px(10.))
-                    .pl(px(theme::PAD))
-                    .pr(px(10.))
+                    .gap(px(8.))
+                    .pl(px(10.))
+                    .pr(px(8.))
                     .border_b_1()
-                    .border_color(theme::edge())
+                    .border_color(theme::hairline())
                     .on_mouse_down(gpui::MouseButton::Left, {
                         let panel = panel.clone();
                         move |_, _, cx| {
@@ -1899,36 +2103,46 @@ impl Render for SettingsView {
                             }
                         }
                     })
-                    .child(caps("Settings").text_color(theme::haze()))
+                    .child(
+                        div().flex().items_center().gap(px(2.)).p(px(3.)).rounded(px(9.)).bg(theme::glass()).children(
+                            SettingsTab::ALL.iter().map(|tab| {
+                                let tab = *tab;
+                                let on = tab == current;
+                                swallow_mouse_down(
+                                    div()
+                                        .id(SharedString::from(format!("tab-{}", tab.label())))
+                                        .px(px(8.))
+                                        .py(px(3.))
+                                        .rounded(px(6.))
+                                        .cursor_pointer()
+                                        .text_size(px(11.5))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(if on { theme::read() } else { theme::haze() })
+                                        .when(on, |d| d.bg(theme::raise()))
+                                        .hover(move |s| if on { s } else { s.text_color(theme::read()) })
+                                        .child(tab.label())
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| this.set_tab(tab, window, cx)),
+                                        ),
+                                )
+                            }),
+                        ),
+                    )
                     .child(div().flex_1())
-                    .children(SettingsTab::ALL.iter().map(|tab| {
-                        let tab = *tab;
-                        let on = tab == current;
-                        swallow_mouse_down(
-                            div()
-                                .id(SharedString::from(format!("tab-{}", tab.label())))
-                                .px(px(5.))
-                                .py(px(4.))
-                                .cursor_pointer()
-                                .text_size(theme::label_size())
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if on { theme::lamp() } else { theme::edge() })
-                                .hover(move |s| if on { s } else { s.text_color(theme::haze()) })
-                                .child(tab.label().to_uppercase())
-                                .on_click(cx.listener(move |this, _, window, cx| this.set_tab(tab, window, cx))),
-                        )
-                    }))
-                    .child(chrome_button("settings-done", "done", {
-                        let panel = panel.clone();
-                        move |_, window, cx| {
-                            if let Some(p) = panel.upgrade() {
-                                p.update(cx, |p, cx| {
-                                    p.close_settings(window, cx);
-                                    window.focus(&p.focus_handle(cx));
-                                });
+                    .child(
+                        crate::ui::widgets::icon_button("settings-done", "close", false, {
+                            let panel = panel.clone();
+                            move |_, window, cx| {
+                                if let Some(p) = panel.upgrade() {
+                                    p.update(cx, |p, cx| {
+                                        p.close_settings(window, cx);
+                                        window.focus(&p.focus_handle(cx));
+                                    });
+                                }
                             }
-                        }
-                    })),
+                        })
+                        .tooltip(crate::ui::widgets::tooltip("Done", Some("Esc"))),
+                    ),
             )
             .child(
                 div()
