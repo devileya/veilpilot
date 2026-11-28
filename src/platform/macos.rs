@@ -387,6 +387,51 @@ pub fn request_screen_permission() -> bool {
     unsafe { CGRequestScreenCaptureAccess() }
 }
 
+/// The app's bundle identifier, when it runs from a bundle.
+fn bundle_identifier() -> Option<String> {
+    unsafe {
+        let bundle: Id = msg_send![class!(NSBundle), mainBundle];
+        let id: Id = msg_send![bundle, bundleIdentifier];
+        let id = ns_to_string(id);
+        (!id.is_empty()).then_some(id)
+    }
+}
+
+/// The .app this process runs from, if any.
+fn bundle_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(|p| p.to_path_buf())
+}
+
+/// Ask for Screen Recording from scratch.
+///
+/// macOS ties the grant to the app's signature, and every build of an
+/// ad-hoc-signed app has a new one. After an update the old "allowed" record
+/// no longer matches: capture is refused, System Settings still shows the
+/// switch on, and macOS does not ask again because it thinks it has an
+/// answer. Clearing the app's own record makes the next request show the
+/// real prompt.
+pub fn reset_screen_permission() {
+    if let Some(id) = bundle_identifier() {
+        match std::process::Command::new("/usr/bin/tccutil").args(["reset", "ScreenCapture", &id]).output() {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => eprintln!("[platform] tccutil: {}", String::from_utf8_lossy(&out.stderr).trim()),
+            Err(err) => eprintln!("[platform] could not run tccutil: {err}"),
+        }
+    }
+    unsafe {
+        CGRequestScreenCaptureAccess();
+    }
+}
+
+/// Start a fresh copy of the app a moment from now; the caller quits. A
+/// permission granted while the app runs only applies after a restart.
+pub fn relaunch() -> bool {
+    let Some(bundle) = bundle_path() else { return false };
+    let script = format!("sleep 0.8; /usr/bin/open -n '{}'", bundle.display().to_string().replace('\'', "'\\''"));
+    std::process::Command::new("/bin/sh").args(["-c", &script]).spawn().is_ok()
+}
+
 pub fn open_screen_settings() {
     super::open_external("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
 }

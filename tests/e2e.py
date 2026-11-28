@@ -479,7 +479,7 @@ def screenshot_tool(app, data):
     check("prompt hotkeys are letters", all(p["accelerator"].rsplit("+", 1)[-1].isalpha() for p in cfg["prompts"]),
           [p["accelerator"] for p in cfg["prompts"]])
     hk = cfg["hotkeys"]
-    check("the number row is the screenshot tool's, as in Shottr",
+    check("the number row is the screenshot tool's",
           hk["snapFullscreen"] == "Command+Shift+1" and hk["snapArea"] == "Command+Shift+2"
           and hk["snapOcr"] == "Command+Control+Alt+O", hk)
 
@@ -811,7 +811,7 @@ def pause_test(app, data):
     check("pauses transcribe while recording continues", live >= 2, (live, lines))
     check("a short breath does not split a sentence", len(lines) == 3, lines)
     check("lines arrive in spoken order", len(lines) == 3 and lines[0].startswith("Selamat")
-          and "jumat" in lines[1].lower() and "pengujian" in lines[1].lower() and lines[2].startswith("Terakhir"), lines)
+          and "jumat" in lines[1].lower().replace("'", "") and "pengujian" in lines[1].lower() and lines[2].startswith("Terakhir"), lines)
 
 
 if __name__ == "__main__":

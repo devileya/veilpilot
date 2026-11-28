@@ -83,11 +83,22 @@ impl Panel {
                         }
                     }
                     Ok(Grabbed::Scroll { frame, area }) => this.start_scrolling(frame, area, window, cx),
-                    Err(err) => this.toast(ToastKind::Error, format!("{err:#}"), cx),
+                    Err(err) => this.snap_failed(err, window, cx),
                 }
             });
         })
         .detach();
+    }
+
+    /// A failed capture is never silent: the panel comes forward with the
+    /// reason, and a missing permission opens the settings that fix it.
+    fn snap_failed(&mut self, err: anyhow::Error, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_minimized(false, cx);
+        self.show(true, window, cx);
+        if capture::is_permission_error(&err) {
+            self.open_settings(Some(crate::ui::settings::SettingsTab::Shots), window, cx);
+        }
+        self.toast(ToastKind::Error, format!("{err:#}"), cx);
     }
 
     /// Do with a new capture what the settings say: copy it, save it, and

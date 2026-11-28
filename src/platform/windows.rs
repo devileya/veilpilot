@@ -92,6 +92,13 @@ pub fn request_screen_permission() -> bool {
 
 pub fn open_screen_settings() {}
 
+pub fn reset_screen_permission() {}
+
+/// Only macOS needs a restart for a permission to apply.
+pub fn relaunch() -> bool {
+    false
+}
+
 pub fn microphone_permission() -> Permission {
     Permission::Granted
 }

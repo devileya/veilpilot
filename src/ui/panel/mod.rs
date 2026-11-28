@@ -355,7 +355,7 @@ impl Panel {
         if cfg!(target_os = "macos") && capture::screen_permission() != Permission::Granted {
             self.toast(
                 ToastKind::Warn,
-                "Screen Recording permission is not granted yet — screenshots will come back empty. Open settings › Capture to fix it.",
+                "Screen Recording is not allowed for this version yet, so screenshots will fail. Settings › Capture fixes it — the first screenshot also asks.",
                 cx,
             );
         }

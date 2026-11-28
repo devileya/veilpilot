@@ -8,9 +8,9 @@ use image::RgbaImage;
 
 use crate::platform::{self, DisplayInfo, Permission, Rect};
 
-pub const PERMISSION_HELP: &str = "macOS is refusing screen capture. Grant Screen Recording to VeilPilot in \
-System Settings › Privacy & Security › Screen Recording, then quit and \
-relaunch the app — the permission only takes effect on a fresh launch.";
+pub const PERMISSION_HELP: &str = "Screenshots need Screen Recording permission. Switch VeilPilot on in \
+System Settings › Privacy & Security › Screen Recording, then reopen VeilPilot — macOS only applies it \
+after a restart. Each update has to be allowed again.";
 
 /// A finished screenshot, ready to attach and to send.
 #[derive(Clone, Debug)]
@@ -50,13 +50,27 @@ fn permission_check_skipped() -> bool {
     std::env::var_os("VEILPILOT_ALLOW_UNPERMITTED_CAPTURE").is_some()
 }
 
+/// Whether this launch has already asked macOS again (see
+/// [`platform::reset_screen_permission`]).
+static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn ensure_permission() -> Result<()> {
     if cfg!(target_os = "macos") && !permission_check_skipped() && screen_permission() != Permission::Granted {
-        // Registers the app in System Settings so there is a switch to flip.
-        platform::request_screen_permission();
+        // Once per launch: a second reset would wipe a grant the user has
+        // just given but that only applies after a restart.
+        if !ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            platform::reset_screen_permission();
+        } else {
+            platform::request_screen_permission();
+        }
         bail!(PERMISSION_HELP);
     }
     Ok(())
+}
+
+/// The error is the missing permission, not something else.
+pub fn is_permission_error(err: &anyhow::Error) -> bool {
+    err.to_string() == PERMISSION_HELP
 }
 
 /// 'cursor' | 'primary' | a display id.

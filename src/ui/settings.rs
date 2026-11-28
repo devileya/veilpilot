@@ -1382,22 +1382,45 @@ impl SettingsView {
         let capture = snap.cfg.capture.clone();
         let win = snap.cfg.window.clone();
         let me = cx.entity().downgrade();
-        let mut out = self.view_snap_tool(snap, window, cx);
-        out.push(section("Asking about the screen", false).into_any_element());
+        let mut out = Vec::new();
         if cfg!(target_os = "macos") && snap.screen != Permission::Granted {
             out.push(
                 div()
-                    .mb(px(15.))
+                    .mb(px(18.))
+                    .p(px(12.))
+                    .rounded(px(theme::RADIUS_LG))
+                    .bg(theme::alpha(theme::live(), 0.08))
+                    .border_1()
+                    .border_color(theme::alpha(theme::live(), 0.35))
                     .child(hint_colored(
-                        format!("Screen Recording permission is **{}**. Screenshots return an empty frame until it is granted.", snap.screen.as_str()),
+                        "Screen Recording is not allowed for this version of VeilPilot, so screenshots can't be taken."
+                            .to_string(),
                         theme::live(),
                     ))
-                    .child(div().mt(px(8.)).flex().child(button("open-screen", "Open System Settings", false, |_, _, _| {
-                        crate::platform::open_screen_settings();
-                    })))
+                    .child(
+                        div()
+                            .mt(px(8.))
+                            .flex()
+                            .gap(px(8.))
+                            .child(crate::ui::widgets::primary_button(
+                                "open-screen",
+                                "Open System Settings",
+                                |_, _, _| {
+                                    crate::platform::open_screen_settings();
+                                },
+                            ))
+                            .child(button("relaunch", "Reopen VeilPilot", false, |_, _, cx| {
+                                if crate::platform::relaunch() {
+                                    cx.quit();
+                                }
+                            })),
+                    )
+                    .child(hint("Already switched on? This version needs it again: switch it off and on, then reopen."))
                     .into_any_element(),
             );
         }
+        out.extend(self.view_snap_tool(snap, window, cx));
+        out.push(section("Asking about the screen", false).into_any_element());
         let mut displays = vec![
             ("cursor".to_string(), "Screen under the pointer".to_string()),
             ("primary".to_string(), "Primary screen".to_string()),
@@ -1906,7 +1929,7 @@ impl SettingsView {
         let mut out = vec![section("Screenshot hotkeys", true).into_any_element()];
         out.push(
             hint(if cfg!(target_os = "macos") {
-                "The number row, as in Shottr. macOS keeps ⌘⇧3, ⌘⇧4 and ⌘⇧5 for its own screenshots — to give one of them to VeilPilot, turn it off in System Settings › Keyboard › Keyboard Shortcuts › Screenshots first. Quit Shottr (or clear its keys) so the two apps don't fight over the same ones."
+                "Screenshots are on the number row. macOS keeps ⌘⇧3, ⌘⇧4 and ⌘⇧5 for its own screenshots — to give one of them to VeilPilot, turn it off in System Settings › Keyboard › Keyboard Shortcuts › Screenshots first. If another screenshot app uses the same keys, clear them there."
             } else {
                 "The number row is for screenshots; asking the model is on letters."
             })

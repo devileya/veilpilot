@@ -141,8 +141,7 @@ Microphone again after a rebuild; a real identity keeps the grants. Notarize wit
 Defaults. `⌘` is `Ctrl` on Windows. Every one of these is editable in Settings › Keys,
 and prompt hotkeys are editable in Settings › Prompts.
 
-**The number row takes screenshots** (the same keys as Shottr, so it can replace it);
-**letters ask the model.**
+**The number row takes screenshots; letters ask the model.**
 
 | Key | Screenshot tool |
 |---|---|
